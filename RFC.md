@@ -254,6 +254,43 @@ context cannot modify its parent.
 },
 ```
 
+#### `get_internal_context — fn(?object $coroutine): object`
+
+Returns the *internal* context of the given coroutine, creating it lazily; `null` designates
+the currently running coroutine. The internal context is a second, separate storage with the
+same shape as the userland context, but reserved for C extensions: it is keyed by
+process-unique **numeric keys** (an extension allocates its key once from a static name) and
+is never visible to PHP code. This guarantees that extension state can neither collide with
+userland keys nor leak into scripts.
+
+A scheduler implemented in PHP must still provide this storage — C extensions use it
+regardless of who schedules.
+
+```php
+'get_internal_context' => function (?object $coroutine): object {
+    $coroutine ??= currentCoroutine();
+    return $coroutine->internalContext ??= new Ctx(parent: null);
+},
+```
+
+#### `internal_context_find — fn(object $context, int $key): mixed` / `internal_context_set — fn(object $context, int $key, mixed $value): bool` / `internal_context_unset — fn(object $context, int $key): bool`
+
+Accessors for the internal context: lookup, store and remove by numeric key. The context is
+the object returned by `get_internal_context`. Values are destroyed together with the owning
+coroutine.
+
+```php
+'internal_context_find'  => fn (object $ctx, int $key): mixed => $ctx->values[$key] ?? null,
+'internal_context_set'   => function (object $ctx, int $key, mixed $value): bool {
+    $ctx->values[$key] = $value;
+    return true;
+},
+'internal_context_unset' => function (object $ctx, int $key): bool {
+    unset($ctx->values[$key]);
+    return true;
+},
+```
+
 #### `shutdown — fn(): bool`
 
 A graceful shutdown has been requested. The implementation stops accepting new work and
