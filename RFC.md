@@ -14,9 +14,13 @@ PHP cannot run code concurrently. Fibers (PHP 8.1) gave us cooperative switching
 framework had to invent its own event loop, its own coroutine type and its own rules — and none
 of them can cooperate with each other or with future engine-level concurrency.
 
-This RFC proposes the missing common ground: **coroutines become a native PHP concept, and the
-logic that drives them — the scheduler — becomes pluggable.** Any C extension or any PHP library
-can register a set of handlers through one function and take control of concurrency:
+This RFC builds on the implementation experience of the
+[TrueAsync project](https://github.com/true-async) — a complete concurrency stack for PHP
+(scheduler, libuv reactor, thread pool) developed and battle-tested over the past years — to
+propose a **universal interface that makes PHP concurrent**: coroutines become a native PHP
+concept, and the logic that drives them — the scheduler — becomes pluggable. Any C extension or
+any PHP library can register a set of handlers through one function and take control of
+concurrency:
 
 ```php
 async_scheduler_register('my-scheduler', false, [
