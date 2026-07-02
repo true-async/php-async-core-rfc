@@ -73,9 +73,12 @@ scheduler does. (The object-oriented API — `Async\Coroutine` and friends — i
  * Registers a concurrency scheduler.
  *
  * $handlers maps handler names to callables; omitted handlers keep their
- * defaults. Returns false when a scheduler is already registered and
- * $allowOverride is false. A scheduler registered by a C extension always
- * takes precedence over one registered from PHP.
+ * defaults. Returns false when a PHP scheduler is already registered and
+ * $allowOverride is false.
+ *
+ * When a C extension has registered the scheduler, calling this function
+ * is forbidden and throws an Error: a C scheduler owns concurrency for
+ * the whole process, and PHP code cannot replace it.
  */
 function async_scheduler_register(string $module, bool $allowOverride, array $handlers): bool {}
 ```
@@ -133,8 +136,6 @@ Next minor PHP 8.x.
 ## Open Issues
 
 1. `$handlers` as an array of callables vs. positional callable parameters.
-2. Should a PHP-registered scheduler be allowed to override a C one when
-   `$allowOverride = true`, or should C always win?
 
 ## Future Scope
 
