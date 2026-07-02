@@ -313,7 +313,7 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
   (core, engine invocation points, phpdbg).
-- Scheduler extension: https://github.com/true-async/php-async-core-ext — the reference C
+- Scheduler extension: https://github.com/true-async/true-async — the reference C
   implementation of the hooks for this core.
 - The PHP registration bridge: to be added to the same branch.
 
@@ -321,8 +321,8 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 
 - [True Async RFC](https://wiki.php.net/rfc/true_async) — the complete concurrency model built
   on this core.
-- [Async Core scheduler extension](https://github.com/true-async/php-async-core-ext) — the
-  reference implementation of the hooks.
+- [TrueAsync scheduler extension](https://github.com/true-async/true-async) — the reference
+  implementation of the hooks.
 - [TrueAsync project](https://github.com/true-async) — the full stack from which this core was
   extracted.
 - `Io\Poll` (`main/php_poll.h`) — the readiness-multiplexing API in php-src master, suitable as
