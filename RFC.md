@@ -1,6 +1,6 @@
 # PHP RFC: Async Core ABI
 
-- **Version:** 0.2
+- **Version:** 0.3
 - **Date:** 2026-07-02
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
@@ -12,13 +12,13 @@
 
 PHP has no native way to execute code concurrently. The [True Async RFC](https://wiki.php.net/rfc/true_async)
 proposes a complete concurrency model; this RFC extracts its **minimal foundation**: a thin,
-policy-free coroutine core inside the Zend engine, and a small set of PHP functions that mirror
-it one-to-one.
+policy-free coroutine core inside the Zend engine, and a single PHP function that lets a
+scheduler plug into it.
 
 The core contains **no scheduler, no reactor, no event system and no classes**. It defines what a
 coroutine *is* (a data structure with a lifecycle) and *where* the engine hands control over.
 Everything else — run queues, IO readiness, timers — is supplied by a registered scheduler:
-a C extension in production, or plain PHP callables for prototyping and testing.
+a C extension in production, or PHP callables for prototyping and testing.
 
 ```php
 async_scheduler_register('my-scheduler', false, [
@@ -27,22 +27,16 @@ async_scheduler_register('my-scheduler', false, [
     'resume'            => fn (object $coroutine, ?Throwable $e) => $loop->switchTo($coroutine, $e),
     // unset handlers keep their default stubs
 ]);
-
-$coro = async_new_coroutine(function () {
-    echo "Hello, ";
-    async_suspend();
-    echo "World!\n";
-});
-async_enqueue_coroutine($coro);
 ```
 
 ## Goals
 
 1. **Mechanism, not policy.** The engine knows how to represent a coroutine and when to hand
    over control. It does not know how to schedule.
-2. **The PHP API mirrors the ABI.** Every PHP function corresponds to exactly one ABI slot,
-   macro or global. Nothing exists at the PHP level that does not exist at the C level.
-   No classes: the ABI is a set of function pointers, so the PHP surface is a set of functions.
+2. **The PHP API mirrors the ABI.** The ABI is a set of function pointers, so the PHP surface
+   is a set of functions — starting with exactly one: the registration. No classes: coroutines
+   and contexts appear in PHP as opaque objects whose concrete classes are supplied by the
+   registered scheduler.
 3. **Zero cost when unused.** Without a registered scheduler PHP executes exactly as today.
 
 ## Proposal
@@ -67,13 +61,10 @@ async_enqueue_coroutine($coro);
 
 Low-level details live in the implementation branch and are intentionally out of scope here.
 
-### The PHP API (mirror of the ABI)
+### The PHP API
 
-A thin C bridge layer exposes the ABI to userland. Coroutines and contexts appear as **opaque
-objects**: the core declares no classes — the concrete class is supplied by the registered
-scheduler (this is what the `get_class_ce` slot expresses at the C level).
-
-#### Registration
+A thin C bridge layer exposes the ABI registration to userland. This RFC proposes exactly
+**one function**:
 
 ```php
 /**
@@ -100,49 +91,22 @@ Recognized `$handlers` keys and their signatures (identical to the ABI slots):
 For a PHP-registered scheduler, `launch` is invoked immediately upon registration (the engine's
 own launch point has already passed by the time userland code runs).
 
-#### Functions
-
-| PHP function | Mirrors (ABI) |
-|---|---|
-| `async_new_coroutine(callable $task, mixed ...$args): object` | `new_coroutine` slot + `fcall` |
-| `async_enqueue_coroutine(object $coroutine): bool` | `enqueue_coroutine` slot |
-| `async_suspend(): bool` | `suspend` slot (`from_main = false`) |
-| `async_resume(object $coroutine, ?Throwable $error = null): bool` | `resume` slot |
-| `async_cancel(object $coroutine, ?Throwable $error = null, bool $safely = false): bool` | `cancel` slot |
-| `async_current_coroutine(): ?object` | `ZEND_ASYNC_CURRENT_COROUTINE` |
-| `async_active_coroutine_count(): int` | `ZEND_ASYNC_ACTIVE_COROUTINE_COUNT` |
-| `async_is_enabled(): bool` | `zend_async_is_enabled()` |
-| `async_coroutine_status(object $coroutine): int` | packed status (constants below) |
-| `async_coroutine_is_cancelled(object $coroutine): bool` | `ZEND_COROUTINE_IS_CANCELLED` |
-| `async_coroutine_result(object $coroutine): mixed` | `coroutine->result` |
-| `async_coroutine_exception(object $coroutine): ?Throwable` | `coroutine->exception` |
-| `async_coroutine_awaiting_info(object $coroutine): ?string` | `awaiting_info` hook |
-| `async_coroutine_spawn_location(object $coroutine): string` | `filename` / `lineno` |
-| `async_get_context(?object $coroutine = null): object` | `get_context` slot (NULL = current) |
-| `async_context_find(object $context, mixed $key, bool $includeParent = true): mixed` | `context_find` slot |
-| `async_context_set(object $context, mixed $key, mixed $value): bool` | `context_set` slot |
-| `async_context_unset(object $context, mixed $key): bool` | `context_unset` slot |
-
-Status constants mirror the packed enum:
-`ASYNC_COROUTINE_CREATED`, `ASYNC_COROUTINE_QUEUED`, `ASYNC_COROUTINE_RUNNING`,
-`ASYNC_COROUTINE_SUSPENDED`, `ASYNC_COROUTINE_FINISHED`.
-
-Not mirrored (pure C mechanics with no PHP expression): `get_class_ce` (class registry),
+Not exposed to PHP (pure C mechanics with no PHP expression): `get_class_ce` (class registry),
 `call_on_main_stack` (OS-thread stack), `get_internal_context` (reserved for C extensions by
 definition), the `transfer_error` ownership flag.
 
 ### Design rule
 
-> A new ABI slot gets a mirroring PHP function with the same signature.
+> A new ABI slot gets a mirroring PHP surface with the same signature.
 > If it cannot be expressed in PHP, it is internal mechanics and gets nothing.
 
 This keeps the two surfaces from ever diverging: the RFC for any future slot is simultaneously
-the RFC for its PHP function.
+the RFC for its PHP mirror.
 
 ## Backward Incompatible Changes
 
-New functions are added to the global namespace with the `async_` prefix. Code declaring
-functions with these exact names would break; a GitHub code search shows no significant usage.
+One new function in the global namespace: `async_scheduler_register()`. Code declaring a
+function with this exact name would break; no significant usage is known.
 
 No engine behaviour changes without a registered scheduler.
 
@@ -156,21 +120,22 @@ Next minor PHP 8.x.
   same pair.
 - **To Existing Extensions:** none by default. Extensions that want async awareness use the ABI
   slots; the internal context gives them per-coroutine state invisible to userland.
-- **To the Ecosystem:** stubs for ~18 global functions and 5 constants.
+- **To the Ecosystem:** a stub for one global function.
 
 ## Open Issues
 
 1. `$handlers` as an array of callables vs. positional callable parameters.
 2. Should `async_scheduler_register()` from PHP be allowed to override a C provider when
    `$allowOverride = true`, or should the C registration always win?
-3. Behaviour of `async_suspend()` with no scheduler registered: throw `\Error` (proposed) or
-   return `false`.
 
 ## Future Scope
 
-- An object-oriented API (`Async\` namespace: `Coroutine`, `Scheduler`, `Context` classes) —
-  the [True Async RFC](https://wiki.php.net/rfc/true_async) territory, built by a provider on
-  top of this core.
+- **Mirror functions for the remaining slots and globals** (`async_new_coroutine()`,
+  `async_suspend()`, `async_resume()`, `async_current_coroutine()`, coroutine field accessors,
+  context accessors) — deferred until the core proves itself.
+- An object-oriented API (`Async\` namespace) — the
+  [True Async RFC](https://wiki.php.net/rfc/true_async) territory, built by a provider on top
+  of this core.
 - A reactor provider over the `Io\Poll` API (`main/php_poll.h`) already in master.
 - Structured concurrency, channels, futures — separate RFCs on top of this core.
 
@@ -182,7 +147,7 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core ABI RFC?"
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
   (`Zend/zend_async_API.h` / `.c`, engine integration in `main/main.c`, `sapi/phpdbg`).
-- The PHP function bridge layer: to be added to the same branch.
+- The PHP registration bridge: to be added to the same branch.
 
 ## References
 
@@ -204,5 +169,7 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core ABI RFC?"
 
 ## Changelog
 
+- 0.3 (2026-07-02): the PHP API is scoped down to `async_scheduler_register()` only; mirror
+  functions moved to Future Scope.
 - 0.2 (2026-07-02): removed all classes; the PHP API is a function-level mirror of the ABI.
 - 0.1 (2026-07-02): initial draft.
