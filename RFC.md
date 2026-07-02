@@ -1,4 +1,4 @@
-# PHP RFC: Async Core
+# PHP RFC: Async Scheduler Hook API
 
 - **Version:** 0.1
 - **Date:** 2026-07-02
@@ -307,7 +307,7 @@ Next minor PHP 8.x.
 
 ## Voting Choices
 
-Yes/no vote, 2/3 majority required: "Accept the Async Core RFC?"
+Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 
 ## Patches and Tests
 
