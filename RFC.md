@@ -1,6 +1,6 @@
 # PHP RFC: Async Core
 
-- **Version:** 0.5
+- **Version:** 0.1
 - **Date:** 2026-07-02
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
@@ -165,18 +165,4 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core RFC?"
 
 ## Rejected Features
 
-- **New classes.** The contract is a set of handlers; the PHP surface is a set of functions.
-  Coroutine objects' classes are scheduler-defined; the OO API belongs to True Async.
-- **PHP access to the execution-flow context.** Per-coroutine context storage exists in the
-  contract but is consumed through the scheduler's own API.
-- **An event system in the core** (awaitables, subscriptions, triggers): scheduler territory.
-  The core keeps only the "what is being awaited" diagnostics hook.
-- **Lazy scheduler initialization:** the scheduler always starts before your code.
-
 ## Changelog
-
-- 0.5 (2026-07-02): rewritten for the PHP-programmer audience.
-- 0.4 (2026-07-02): Proposal rewritten concept-first, all C code removed.
-- 0.3 (2026-07-02): PHP API scoped down to `async_scheduler_register()` only.
-- 0.2 (2026-07-02): removed all classes; function-level mirror of the internal contract.
-- 0.1 (2026-07-02): initial draft.
