@@ -10,62 +10,66 @@
 
 ## Introduction
 
-PHP cannot run code concurrently. Fibers (PHP 8.1) gave us cooperative switching, but every
-framework had to invent its own event loop, its own coroutine type and its own rules — and none
-of them can cooperate with each other or with future engine-level concurrency.
+PHP provides no native mechanism for concurrent code execution. Fibers (PHP 8.1) introduced
+cooperative context switching, but left scheduling entirely to userland. As a result, each
+framework maintains its own event loop, its own coroutine abstraction and its own conventions;
+these implementations are mutually incompatible and cannot interoperate with any future
+engine-level concurrency.
 
-**The goal of this RFC is to let PHP activate a concurrent mode.** It builds on the
-implementation experience of the [TrueAsync project](https://github.com/true-async) — a complete
-concurrency stack for PHP (scheduler, libuv reactor, thread pool) — to propose a universal
-interface: coroutines become a native PHP concept, and the logic that drives them — the
-scheduler — becomes pluggable. Any C extension or any PHP library registers a set of hooks
-through one function, and from that moment PHP is concurrent:
+**The purpose of this RFC is to give PHP the ability to activate a concurrent execution mode.**
+The proposal is based on the implementation experience of the
+[TrueAsync project](https://github.com/true-async) — a complete concurrency stack for PHP
+(scheduler, libuv reactor, thread pool) — and introduces a universal interface: coroutines
+become a native engine concept, and the component that drives them — the scheduler — becomes
+pluggable. A C extension or a PHP library registers a set of hooks through a single function;
+from that point on, PHP operates concurrently.
 
 ```php
 async_scheduler_register('my-scheduler', false, [
     'enqueue_coroutine' => enqueue(...),   // a coroutine is ready to run
-    'suspend'           => suspend(...),   // the current code yields: pick who runs next
+    'suspend'           => suspend(...),   // the current flow yields: select the next coroutine
     'resume'            => resume(...),    // wake a suspended coroutine
 ]);
 ```
 
-## What this RFC deliberately does NOT define
+## Scope: what this RFC deliberately does not define
 
-This document defines the *activation contract* and nothing above it. **Extensions and
-third-party code are free to create any functions, classes or APIs on top of the registered
-scheduler — `spawn()`, `await()`, channels, futures, an `Async\` namespace — and this RFC
-intentionally defines none of them.** The coroutine object's class, the way values travel
-between coroutines, the shape of the user-facing API — all of that is the scheduler's
-territory. (The [True Async RFC](https://wiki.php.net/rfc/true_async) is one such API,
-built on this core.)
+This document specifies the *activation contract* and nothing beyond it. **Extensions and
+third-party code remain free to define arbitrary functions, classes and APIs on top of the
+registered scheduler — `spawn()`, `await()`, channels, futures, an `Async\` namespace — and
+this RFC intentionally defines none of them.** The class of the coroutine object, the transfer
+of values between coroutines, and the shape of the user-facing API are the exclusive domain of
+the scheduler implementation. The [True Async RFC](https://wiki.php.net/rfc/true_async) is one
+such API, built on this core.
 
-This separation is the point: the engine standardizes *how concurrency is switched on and who
-is in charge*, while the ecosystem keeps full freedom in *what it looks like for the user*.
+This separation is deliberate: the engine standardizes *how concurrency is activated and which
+component is in charge*, while the ecosystem retains full freedom over *how concurrency is
+presented to the user*.
 
 ## Goals
 
-1. **One activation contract instead of many frameworks.** With a single registration point,
-   "which event loop are you on?" stops being a question a library has to ask.
-2. **Concurrency you can hold in your hands.** A scheduler can be written in plain PHP — for
-   tests, for teaching, for experiments. The same hook set, registered from C, powers
-   production.
-3. **Nothing changes until you opt in.** No scheduler registered — PHP behaves exactly as
-   today, at effectively zero cost.
+1. **A single activation contract.** One registration point removes the need for libraries to
+   depend on a specific event-loop implementation.
+2. **Schedulers implementable in PHP.** A scheduler may be written in plain PHP — for testing,
+   verification and experimentation. The identical hook set, registered from C, serves
+   production use.
+3. **Strict opt-in.** With no scheduler registered, PHP behaves exactly as it does today, at
+   negligible cost.
 
 ## Proposal
 
 ### Coroutines
 
-A coroutine is a lightweight unit of execution — a callable with its own lifecycle:
+A coroutine is a lightweight unit of execution: a callable with a defined lifecycle:
 
 > created → queued → running → suspended → finished
 
-Two more things can be true about it at any point: it was *cancelled*, or it is the *main*
-coroutine (your top-level script — yes, it becomes a coroutine too). Every coroutine knows its
-result or unhandled exception, where in the code it was spawned, and — if it is suspended —
-*what* it is waiting for (see the `awaiting_info` hook below).
+Two orthogonal attributes may additionally apply: *cancelled* (cancellation has been requested)
+and *main* (the coroutine that wraps the top-level script). Each coroutine records its
+completion result or unhandled exception, the source location at which it was spawned, and —
+while suspended — a description of what it is waiting for (see the `awaiting_info` hook).
 
-In PHP code a coroutine is an opaque object. This RFC does not define its class — the
+At the PHP level a coroutine is an opaque object. This RFC does not define its class; the
 registered scheduler does.
 
 ### Registration
@@ -74,31 +78,32 @@ registered scheduler does.
 /**
  * Registers a concurrency scheduler and activates the concurrent mode.
  *
- * $hooks maps hook names to callables; omitted hooks keep their defaults.
- * Returns false when a PHP scheduler is already registered and
- * $allowOverride is false.
+ * $hooks maps hook names to callables; omitted hooks retain their default
+ * implementations. Returns false when a PHP scheduler is already registered
+ * and $allowOverride is false.
  *
- * When a C extension has registered the scheduler, calling this function
- * is forbidden and throws an Error: a C scheduler owns concurrency for
- * the whole process, and PHP code cannot replace it.
+ * When the scheduler has been registered by a C extension, calling this
+ * function is prohibited and throws an Error: a C scheduler owns
+ * concurrency for the entire process and cannot be replaced from PHP.
  */
 function async_scheduler_register(string $module, bool $allowOverride, array $hooks): bool {}
 ```
 
-The hook set is versioned: future PHP versions may append hooks, and a scheduler written
-against an older set keeps working.
+The hook set is versioned. Future PHP versions may append hooks; a scheduler written against an
+earlier set remains functional.
 
-### The hooks in detail
+### Hook specification
 
-The examples below sketch a minimal cooperative scheduler holding its state in
-`$queue = new SplQueue()`. They show the *policy* each hook implements; the engine performs
-the actual coroutine switches.
+Each hook is specified below together with a minimal illustrative implementation. The examples
+sketch a cooperative scheduler whose state is a single run queue (`$queue = new SplQueue()`).
+The hooks implement scheduling *policy*; the actual coroutine switches are performed by the
+engine.
 
 #### `launch — fn(): bool`
 
-Called once when the scheduler starts. For a C scheduler that happens right before the script
-code runs; for a PHP scheduler — immediately at registration (your code is already running).
-Initialize your state here.
+Invoked once when the scheduler starts. For a C-registered scheduler this occurs immediately
+before the script code begins executing; for a PHP-registered scheduler — at the moment of
+registration, since script code is already running. State initialization belongs here.
 
 ```php
 'launch' => function (): bool {
@@ -109,8 +114,9 @@ Initialize your state here.
 
 #### `new_coroutine — fn(): object`
 
-Called whenever a coroutine object must be created (e.g. a library spawns a task). The hook
-returns the object that will represent the coroutine; its class is yours.
+Invoked whenever a coroutine object must be created (for example, when a library spawns a
+task). The hook returns the object that represents the coroutine; its class is defined by the
+scheduler.
 
 ```php
 'new_coroutine' => fn (): object => new WorkerCoroutine(),
@@ -118,8 +124,9 @@ returns the object that will represent the coroutine; its class is yours.
 
 #### `enqueue_coroutine — fn(object $coroutine): bool`
 
-A coroutine became ready to run — a fresh one, or one whose wait is over. Put it into your run
-queue. Return `false` if you cannot accept it (e.g. shutting down).
+A coroutine has become ready for execution — either newly created or with its wait completed.
+The implementation places it into the run queue. A return value of `false` indicates the
+coroutine was not accepted (for example, during shutdown).
 
 ```php
 'enqueue_coroutine' => function (object $coroutine): bool {
@@ -130,36 +137,37 @@ queue. Return `false` if you cannot accept it (e.g. shutting down).
 
 #### `suspend — fn(bool $fromMain, bool $isBailout): bool`
 
-The heart of the scheduler. The currently running code yields, and your policy decides who runs
-next — typically by taking the next coroutine from the queue and asking the engine to switch to
-it. Two special flags describe the *after-main handover*:
+The central scheduling hook. The currently running flow yields; the implementation selects the
+next coroutine to execute — typically by dequeuing it and requesting the switch from the
+engine. Two parameters describe the *after-main handover*:
 
-- `$fromMain = true` — the main script (or its destructors) has finished; run the remaining
-  coroutines to completion instead of picking just one.
-- `$isBailout = true` — the main flow ended abnormally (`exit()`, fatal error); decide whether
-  to finish or cancel the rest.
+- `$fromMain = true` — the main script (or its destructors) has finished; the remaining
+  coroutines are to be run to completion rather than performing a single switch.
+- `$isBailout = true` — the main flow terminated abnormally (`exit()`, fatal error); the
+  implementation decides whether the remaining coroutines are completed or cancelled.
 
 ```php
 'suspend' => function (bool $fromMain, bool $isBailout): bool {
     if ($isBailout) {
-        return false;                       // drop remaining work on fatal errors
+        return false;                       // discard remaining work on abnormal termination
     }
     while (!$GLOBALS['queue']->isEmpty()) {
         $next = $GLOBALS['queue']->dequeue();
-        // ask the engine to continue $next; returns here when it yields
+        // request the engine to continue $next; control returns here when it yields
         if (!$fromMain) {
-            return true;                    // normal yield: one switch is enough
+            return true;                    // regular yield: a single switch suffices
         }
     }
-    return true;                            // after main: queue fully drained
+    return true;                            // after main: the queue is fully drained
 },
 ```
 
 #### `resume — fn(object $coroutine, ?Throwable $error): bool`
 
-Someone asks to wake a suspended coroutine. With `$error`, the throwable is thrown at the
-coroutine's suspension point — this is how timeouts and IO failures reach the waiting code.
-Typical implementation: validate the state and hand the coroutine back to the queue.
+A request to wake a suspended coroutine. When `$error` is provided, the throwable is thrown at
+the coroutine's suspension point; this is the mechanism by which timeouts and IO failures reach
+waiting code. A typical implementation validates the coroutine's state and returns it to the
+run queue.
 
 ```php
 'resume' => function (object $coroutine, ?Throwable $error): bool {
@@ -169,15 +177,13 @@ Typical implementation: validate the state and hand the coroutine back to the qu
 },
 ```
 
-#### `cancel — fn(object $coroutine, ?Throwable $error, bool $safely): bool`
+#### `cancel — fn(object $coroutine, ?Throwable $error): bool`
 
-Cancellation was requested. Unlike a plain `resume` with an error, cancellation is a *state*:
-the coroutine is marked cancelled, and the mark stays visible after it finishes. With
-`$safely = true` the delivery must be deferred until the coroutine reaches a point where
-cancellation is allowed.
+A request to cancel a coroutine. Unlike `resume` with an error, cancellation is a *state*: the
+coroutine is marked cancelled, and the mark remains observable after completion.
 
 ```php
-'cancel' => function (object $coroutine, ?Throwable $error, bool $safely): bool {
+'cancel' => function (object $coroutine, ?Throwable $error): bool {
     $coroutine->cancelled = true;
     return $this->resume($coroutine, $error ?? new CancellationError('cancelled'));
 },
@@ -185,9 +191,10 @@ cancellation is allowed.
 
 #### `awaiting_info — fn(object $coroutine): ?string`
 
-The diagnostics hook: given a suspended coroutine, return a human-readable description of what
-it is waiting for — or `null` if unknown. The engine calls it when concurrency needs to be
-*explained*: introspection tools, deadlock reports, debugger output.
+The diagnostics hook. Given a suspended coroutine, the implementation returns a human-readable
+description of what the coroutine is waiting for, or `null` when unknown. The engine invokes
+this hook wherever concurrency must be explained: introspection tooling, deadlock reports,
+debugger output.
 
 ```php
 'awaiting_info' => function (object $coroutine): ?string {
@@ -202,11 +209,11 @@ it is waiting for — or `null` if unknown. The engine calls it when concurrency
 
 #### `get_context — fn(?object $coroutine): object`
 
-Every coroutine carries an *execution-flow context*: key/value storage that flows along the
-logical chain of execution (request id, tracing span, locale). The hook returns the context of
-the given coroutine, creating it lazily; `null` means the currently running coroutine. Context
-objects are opaque — their class is yours; inheritance between parent and child coroutines is
-your policy (share, copy-on-write, chain lookup).
+Each coroutine is associated with an *execution-flow context*: key/value storage that follows
+the logical chain of execution (request identifier, tracing span, locale). The hook returns the
+context of the given coroutine, creating it lazily; `null` designates the currently running
+coroutine. Context objects are opaque; their class and the inheritance model between parent and
+child coroutines (sharing, copy-on-write, chained lookup) are defined by the scheduler.
 
 ```php
 'get_context' => function (?object $coroutine): object {
@@ -217,8 +224,8 @@ your policy (share, copy-on-write, chain lookup).
 
 #### `context_find — fn(object $context, mixed $key, bool $includeParent): mixed`
 
-Look a key up in a context; with `$includeParent = true`, continue up the inheritance chain.
-Keys are strings or objects (object identity).
+Performs a key lookup in the given context; when `$includeParent = true`, the lookup continues
+along the inheritance chain. Keys are strings or objects (compared by identity).
 
 ```php
 'context_find' => function (object $ctx, mixed $key, bool $includeParent): mixed {
@@ -233,7 +240,8 @@ Keys are strings or objects (object identity).
 
 #### `context_set — fn(object $context, mixed $key, mixed $value): bool` / `context_unset — fn(object $context, mixed $key): bool`
 
-Store or remove a value in the given context (local only — a child cannot edit its parent).
+Stores or removes a value in the given context. Both operations are strictly local: a child
+context cannot modify its parent.
 
 ```php
 'context_set'   => function (object $ctx, mixed $key, mixed $value): bool {
@@ -248,37 +256,40 @@ Store or remove a value in the given context (local only — a child cannot edit
 
 #### `shutdown — fn(): bool`
 
-Graceful shutdown was requested. Stop accepting work, decide the fate of what remains.
+A graceful shutdown has been requested. The implementation stops accepting new work and
+determines the fate of the remaining coroutines.
 
 ```php
 'shutdown' => function (): bool {
     while (!$GLOBALS['queue']->isEmpty()) {
-        $this->cancel($GLOBALS['queue']->dequeue(), null, false);
+        $this->cancel($GLOBALS['queue']->dequeue(), null);
     }
     return true;
 },
 ```
 
-### When the engine calls you
+### Engine invocation points
 
-The scheduler is **always on** — no lazy initialization, no "first async call starts the loop"
-magic:
+The scheduler is **always active** — there is no lazy initialization and no implicit start on
+the first asynchronous call:
 
-- it **launches before your code runs** (PHP-registered: immediately at registration);
-- when the main script finishes — normally or via `exit()` — `suspend(fromMain: true, ...)` is
-  invoked so the remaining coroutines can **run to completion**;
-- it is invoked once more **after object destructors**, then concurrency is over for the
-  request.
+- the scheduler **launches before the script code executes** (for a PHP-registered scheduler:
+  at the moment of registration);
+- when the main script finishes — normally or through `exit()` — the engine invokes
+  `suspend(fromMain: true, ...)` so that the remaining coroutines **run to completion**;
+- the scheduler receives control once more **after object destructors**; thereafter concurrency
+  is terminated for the request.
 
-So a script that spawns background work and reaches its last line does not silently drop that
-work — the scheduler decides what "the end of the request" means.
+Consequently, a script that spawns background work and reaches its final statement does not
+silently discard that work: the scheduler defines the semantics of the end of the request.
 
 ## Backward Incompatible Changes
 
-One new function in the global namespace: `async_scheduler_register()`. Code declaring a
+One function is added to the global namespace: `async_scheduler_register()`. Code declaring a
 function with this exact name would break; no significant usage is known.
 
-Nothing else changes: without a registered scheduler PHP behaves exactly as before.
+No other observable changes are introduced: with no scheduler registered, PHP behaves exactly
+as before.
 
 ## Proposed PHP Version(s)
 
@@ -286,12 +297,12 @@ Next minor PHP 8.x.
 
 ## RFC Impact
 
-- **To SAPIs:** none observable. CLI, FPM and phpdbg gain the handover points described above,
-  inactive without a scheduler.
-- **To Existing Extensions:** none by default. Extensions that want to be async-aware get a
-  dedicated internal per-coroutine context, invisible to PHP code.
+- **To SAPIs:** none observable. CLI, FPM and phpdbg gain the invocation points described
+  above; all remain inactive without a registered scheduler.
+- **To Existing Extensions:** none by default. Extensions requiring async awareness receive a
+  dedicated internal per-coroutine context, inaccessible from PHP code.
 - **To the Ecosystem:** a stub for one global function. Event-loop libraries (Revolt, ReactPHP,
-  AMPHP, Swoole) gain a common registration point instead of N private cores.
+  AMPHP, Swoole) obtain a common registration point in place of private, incompatible cores.
 
 ## Voting Choices
 
@@ -300,22 +311,22 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core RFC?"
 ## Patches and Tests
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
-  (core, engine handover points, phpdbg).
+  (core, engine invocation points, phpdbg).
 - Scheduler extension: https://github.com/true-async/php-async — the TrueAsync extension,
   the reference C implementation of the hooks.
 - The PHP registration bridge: to be added to the same branch.
 
 ## References
 
-- [True Async RFC](https://wiki.php.net/rfc/true_async) — the full concurrency model built on
-  this core.
+- [True Async RFC](https://wiki.php.net/rfc/true_async) — the complete concurrency model built
+  on this core.
 - [TrueAsync extension](https://github.com/true-async/php-async) — the reference scheduler
   implementation (coroutines, libuv reactor, thread pool).
-- [TrueAsync project](https://github.com/true-async) — the complete stack this core was
-  distilled from.
-- `Io\Poll` (`main/php_poll.h`) — the readiness-multiplexing API in php-src master that a
-  userland event loop builds on.
-- [SCHEDULER.md](SCHEDULER.md) — exact engine handover points (for implementers).
+- [TrueAsync project](https://github.com/true-async) — the full stack from which this core was
+  extracted.
+- `Io\Poll` (`main/php_poll.h`) — the readiness-multiplexing API in php-src master, suitable as
+  the IO source for a userland event loop.
+- [SCHEDULER.md](SCHEDULER.md) — the exact engine invocation points (for implementers).
 
 ## Rejected Features
 
