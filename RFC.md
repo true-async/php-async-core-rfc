@@ -200,6 +200,52 @@ it is waiting for — or `null` if unknown. The engine calls it when concurrency
 // "coroutine #12, spawned at worker.php:40 — socket #7 (readable)"
 ```
 
+#### `get_context — fn(?object $coroutine): object`
+
+Every coroutine carries an *execution-flow context*: key/value storage that flows along the
+logical chain of execution (request id, tracing span, locale). The hook returns the context of
+the given coroutine, creating it lazily; `null` means the currently running coroutine. Context
+objects are opaque — their class is yours; inheritance between parent and child coroutines is
+your policy (share, copy-on-write, chain lookup).
+
+```php
+'get_context' => function (?object $coroutine): object {
+    $coroutine ??= currentCoroutine();
+    return $coroutine->context ??= new Ctx(parent: $coroutine->spawnedBy?->context);
+},
+```
+
+#### `context_find — fn(object $context, mixed $key, bool $includeParent): mixed`
+
+Look a key up in a context; with `$includeParent = true`, continue up the inheritance chain.
+Keys are strings or objects (object identity).
+
+```php
+'context_find' => function (object $ctx, mixed $key, bool $includeParent): mixed {
+    for (; $ctx !== null; $ctx = $includeParent ? $ctx->parent : null) {
+        if ($ctx->values->offsetExists($key)) {
+            return $ctx->values[$key];
+        }
+    }
+    return null;
+},
+```
+
+#### `context_set — fn(object $context, mixed $key, mixed $value): bool` / `context_unset — fn(object $context, mixed $key): bool`
+
+Store or remove a value in the given context (local only — a child cannot edit its parent).
+
+```php
+'context_set'   => function (object $ctx, mixed $key, mixed $value): bool {
+    $ctx->values[$key] = $value;
+    return true;
+},
+'context_unset' => function (object $ctx, mixed $key): bool {
+    unset($ctx->values[$key]);
+    return true;
+},
+```
+
 #### `shutdown — fn(): bool`
 
 Graceful shutdown was requested. Stop accepting work, decide the fate of what remains.
@@ -243,7 +289,7 @@ Next minor PHP 8.x.
 - **To SAPIs:** none observable. CLI, FPM and phpdbg gain the handover points described above,
   inactive without a scheduler.
 - **To Existing Extensions:** none by default. Extensions that want to be async-aware get a
-  dedicated internal per-coroutine storage, invisible to PHP code.
+  dedicated internal per-coroutine context, invisible to PHP code.
 - **To the Ecosystem:** a stub for one global function. Event-loop libraries (Revolt, ReactPHP,
   AMPHP, Swoole) gain a common registration point instead of N private cores.
 
