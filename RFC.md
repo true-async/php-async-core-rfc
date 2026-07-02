@@ -222,14 +222,14 @@ child coroutines (sharing, copy-on-write, chained lookup) are defined by the sch
 },
 ```
 
-#### `context_find — fn(object $context, mixed $key, bool $includeParent): mixed`
+#### `context_find — fn(object $context, mixed $key): mixed`
 
-Performs a key lookup in the given context; when `$includeParent = true`, the lookup continues
-along the inheritance chain. Keys are strings or objects (compared by identity).
+Performs a key lookup in the given context. Whether the lookup consults parent contexts is the
+scheduler's policy. Keys are strings or objects (compared by identity).
 
 ```php
-'context_find' => function (object $ctx, mixed $key, bool $includeParent): mixed {
-    for (; $ctx !== null; $ctx = $includeParent ? $ctx->parent : null) {
+'context_find' => function (object $ctx, mixed $key): mixed {
+    for (; $ctx !== null; $ctx = $ctx->parent) {
         if ($ctx->values->offsetExists($key)) {
             return $ctx->values[$key];
         }
@@ -300,7 +300,8 @@ Next minor PHP 8.x.
 - **To SAPIs:** none observable. CLI, FPM and phpdbg gain the invocation points described
   above; all remain inactive without a registered scheduler.
 - **To Existing Extensions:** none by default. Extensions requiring async awareness receive a
-  dedicated internal per-coroutine context, inaccessible from PHP code.
+  dedicated internal per-coroutine context keyed by process-unique numeric keys, inaccessible
+  from PHP code.
 - **To the Ecosystem:** a stub for one global function. Event-loop libraries (Revolt, ReactPHP,
   AMPHP, Swoole) obtain a common registration point in place of private, incompatible cores.
 
