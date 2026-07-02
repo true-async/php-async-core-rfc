@@ -293,21 +293,6 @@ Next minor PHP 8.x.
 - **To the Ecosystem:** a stub for one global function. Event-loop libraries (Revolt, ReactPHP,
   AMPHP, Swoole) gain a common registration point instead of N private cores.
 
-## Open Issues
-
-1. `$hooks` as an array of callables vs. positional callable parameters.
-
-## Future Scope
-
-- **Functions to drive coroutines directly** (`async_new_coroutine()`, `async_suspend()`,
-  `async_resume()`, `async_current_coroutine()`, coroutine state accessors) — deferred until
-  the core proves itself.
-- **The object-oriented API** (`Async\` namespace: `Coroutine`, `spawn()`, `await()`) — the
-  [True Async RFC](https://wiki.php.net/rfc/true_async), built on this core.
-- **A built-in reactor** over the `Io\Poll` API already in master — so a production event loop
-  ships with PHP.
-- Structured concurrency, channels, futures — separate RFCs on top of this core.
-
 ## Voting Choices
 
 Yes/no vote, 2/3 majority required: "Accept the Async Core RFC?"
@@ -316,14 +301,18 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core RFC?"
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
   (core, engine handover points, phpdbg).
+- Scheduler extension: https://github.com/true-async/php-async — the TrueAsync extension,
+  the reference C implementation of the hooks.
 - The PHP registration bridge: to be added to the same branch.
 
 ## References
 
 - [True Async RFC](https://wiki.php.net/rfc/true_async) — the full concurrency model built on
   this core.
-- [TrueAsync reference implementation](https://github.com/true-async) — the complete stack
-  (scheduler, libuv reactor, thread pool) this core was distilled from.
+- [TrueAsync extension](https://github.com/true-async/php-async) — the reference scheduler
+  implementation (coroutines, libuv reactor, thread pool).
+- [TrueAsync project](https://github.com/true-async) — the complete stack this core was
+  distilled from.
 - `Io\Poll` (`main/php_poll.h`) — the readiness-multiplexing API in php-src master that a
   userland event loop builds on.
 - [SCHEDULER.md](SCHEDULER.md) — exact engine handover points (for implementers).
