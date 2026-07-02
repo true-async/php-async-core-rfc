@@ -35,8 +35,8 @@ async_scheduler_register('my-scheduler', false, [
    over control. It does not know how to schedule.
 2. **The PHP API mirrors the ABI.** The ABI is a set of function pointers, so the PHP surface
    is a set of functions — starting with exactly one: the registration. No classes: coroutines
-   and contexts appear in PHP as opaque objects whose concrete classes are supplied by the
-   registered scheduler.
+   appear in PHP as opaque objects whose concrete classes are supplied by the registered
+   scheduler.
 3. **Zero cost when unused.** Without a registered scheduler PHP executes exactly as today.
 
 ## Proposal
@@ -92,8 +92,9 @@ For a PHP-registered scheduler, `launch` is invoked immediately upon registratio
 own launch point has already passed by the time userland code runs).
 
 Not exposed to PHP (pure C mechanics with no PHP expression): `get_class_ce` (class registry),
-`call_on_main_stack` (OS-thread stack), `get_internal_context` (reserved for C extensions by
-definition), the `transfer_error` ownership flag.
+`call_on_main_stack` (OS-thread stack), the execution-flow context slots (`get_context`,
+`get_internal_context`, `context_find/set/unset` — consumed through the provider's own API),
+the `transfer_error` ownership flag.
 
 ### Design rule
 
@@ -130,9 +131,9 @@ Next minor PHP 8.x.
 
 ## Future Scope
 
-- **Mirror functions for the remaining slots and globals** (`async_new_coroutine()`,
-  `async_suspend()`, `async_resume()`, `async_current_coroutine()`, coroutine field accessors,
-  context accessors) — deferred until the core proves itself.
+- **Mirror functions for the scheduler slots and globals** (`async_new_coroutine()`,
+  `async_suspend()`, `async_resume()`, `async_current_coroutine()`, coroutine field accessors) —
+  deferred until the core proves itself.
 - An object-oriented API (`Async\` namespace) — the
   [True Async RFC](https://wiki.php.net/rfc/true_async) territory, built by a provider on top
   of this core.
@@ -161,7 +162,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core ABI RFC?"
 ## Rejected Features
 
 - **Classes in the core.** The ABI is a set of function pointers; the PHP surface is a set of
-  functions. Coroutine/context values are opaque objects whose classes are provider-defined.
+  functions. Coroutine values are opaque objects whose classes are provider-defined.
+- **PHP mirrors for the context slots.** The execution-flow context is consumed through the
+  provider's own API; the core exposes no PHP-level context functions.
 - **Event system in the core** (awaitable base struct, callback vectors, triggers): provider
   territory. The core keeps only the `awaiting_info` diagnostics hook.
 - **Embedded waker:** wait-state storage is provider-defined.
@@ -169,7 +172,7 @@ Yes/no vote, 2/3 majority required: "Accept the Async Core ABI RFC?"
 
 ## Changelog
 
-- 0.3 (2026-07-02): the PHP API is scoped down to `async_scheduler_register()` only; mirror
-  functions moved to Future Scope.
+- 0.3 (2026-07-02): the PHP API is scoped down to `async_scheduler_register()` only; scheduler
+  slot mirrors moved to Future Scope; context slots get no PHP mirrors at all.
 - 0.2 (2026-07-02): removed all classes; the PHP API is a function-level mirror of the ABI.
 - 0.1 (2026-07-02): initial draft.
