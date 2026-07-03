@@ -93,6 +93,7 @@ final class Async\SchedulerHook
     public const string CONTEXT_SET     = 'context_set';
     public const string CONTEXT_UNSET   = 'context_unset';
     public const string GC_DESTRUCTORS  = 'gc_destructors';
+    public const string DEFER           = 'defer';
 
     /**
      * Registers a scheduler and activates the concurrent mode.
@@ -116,14 +117,12 @@ final class Async\SchedulerHook
      */
     public static function switchTo(\Fiber $fiber): mixed {}
 
-    /** Queues a callable to run on the next scheduler tick (one-shot). */
-    public static function defer(callable $task): void {}
-
     /**
-     * Drains the pending microtasks. The scheduler must call this on
-     * every tick. Returns true when any task ran.
+     * Queues a callable on the scheduler's microtask queue (one-shot,
+     * runs on the next tick). Forwards to the DEFER hook: the queue and
+     * its draining belong to the scheduler.
      */
-    public static function runMicrotasks(): bool {}
+    public static function defer(callable $task): void {}
 
     /**
      * Runs the destructors pending in the current GC destructor phase.
@@ -142,10 +141,9 @@ manipulates stacks; it selects a coroutine and asks the engine to continue it. C
 from `switchTo()` when the coroutine yields or finishes, so a complete scheduler loop is:
 dequeue, `switchTo()`, repeat.
 
-The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the engine
-(`defer()` adds to it), and the scheduler's only duty is to drain it on every tick by calling
-`runMicrotasks()`. Tasks queued while draining run within the same drain, the classic microtask
-semantics.
+The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the
+scheduler, not by the engine. `defer()` only forwards the callable to the scheduler's DEFER
+hook; storage, draining and the exact semantics are the scheduler's policy.
 
 ### Hook specification
 
@@ -337,6 +335,19 @@ own machinery. The engine exposes no such flag, and the set is private to the sc
 
 Unlike the other hooks, `intercept_fiber` receives a real `Fiber` object rather than an opaque
 coroutine, because the fiber has not been adopted yet at the moment the decision is made.
+
+#### `defer(callable $task): bool`
+
+Queues a one-shot task on the scheduler's microtask queue; the scheduler runs it on its next
+tick. The engine never stores tasks itself: both `SchedulerHook::defer()` and C-level consumers
+route through this hook, and the queue lives entirely in the scheduler.
+
+```php
+Async\SchedulerHook::DEFER => function (callable $task) use ($tasks): bool {
+    $tasks->enqueue($task);
+    return true;
+},
+```
 
 #### `gc_destructors(callable $run): bool`
 
