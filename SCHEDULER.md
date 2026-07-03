@@ -72,7 +72,8 @@ the resumer, which on the coroutine path is the scheduler's own resume call.
   while the Async state is off; PHP without a scheduler behaves exactly as
   before.
 - **Policy vs mechanism.** Hooks never manipulate stacks. The engine owns the
-  context switch (`switchTo`), the value transfer (`zend_fiber.transfer`) and
+  context switch (the direct Fiber path in scheduler context), the value
+  transfer (`zend_fiber.transfer`) and
   the coroutine lifecycle status; the hooks own ordering, queues and the
   decision which fibers to adopt.
 - **`isBailout` contract.** `suspend(fromMain: true, isBailout: true)` tells
