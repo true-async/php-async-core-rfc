@@ -299,11 +299,12 @@ scheduler instead of blocking the thread), `false` to keep the fiber in legacy m
 when the hook is not provided — in which case fibers remain legacy.
 
 **Why this hook is necessary.** Existing concurrency frameworks (ReactPHP/Revolt, AMPHP) are
-themselves implemented on top of fibers: a "coroutine" in those libraries *is* a `Fiber`, and
-their event loop resumes those fibers from its own callbacks. If the engine adopted every
-fiber unconditionally, a scheduler written this way would recurse into itself — its internal
-loop fiber would be turned into a coroutine, whose suspension would call back into the very
-scheduler that is trying to run it.
+themselves implemented on top of fibers: the fiber is the low-level switching primitive their
+event loop drives — suspending to yield to the loop, resuming from its callbacks — while their
+user-facing concurrency abstractions are built above it. If the engine adopted every fiber
+unconditionally, a scheduler written this way would recurse into itself: the fibers it drives
+as part of its own implementation would be turned into coroutines, whose suspension would call
+back into the very scheduler that is trying to run them.
 
 `intercept_fiber` resolves this by letting the scheduler decide **per fiber**, because only the
 scheduler can tell its own machinery apart from application code. A scheduler keeps references
