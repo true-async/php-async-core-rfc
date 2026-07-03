@@ -291,6 +291,50 @@ coroutine.
 },
 ```
 
+#### `intercept_fiber — fn(object $fiber): ?bool`
+
+Called by the engine on every `Fiber::start()` while a scheduler is active. It returns `true`
+to adopt the fiber onto the coroutine path (its `Fiber::suspend()`/`resume()` route through the
+scheduler instead of blocking the thread), `false` to keep the fiber in legacy mode, or `null`
+when the hook is not provided — in which case fibers remain legacy.
+
+**Why this hook is necessary.** Existing concurrency frameworks (ReactPHP/Revolt, AMPHP) are
+themselves implemented on top of fibers: a "coroutine" in those libraries *is* a `Fiber`, and
+their event loop resumes those fibers from its own callbacks. If the engine adopted every
+fiber unconditionally, a scheduler written this way would recurse into itself — its internal
+loop fiber would be turned into a coroutine, whose suspension would call back into the very
+scheduler that is trying to run it.
+
+`intercept_fiber` resolves this by letting the scheduler decide **per fiber**, because only the
+scheduler can tell its own machinery apart from application code. A scheduler keeps references
+to the fibers it creates for itself and returns `false` for them, `true` for the rest. No flag
+is placed on the fiber and the engine tracks nothing — the distinction lives entirely in the
+scheduler:
+
+```php
+final class Scheduler
+{
+    private \SplObjectStorage $internalFibers;   // the fibers I run myself
+
+    private function runInternal(\Closure $fn): void
+    {
+        $fiber = new \Fiber($fn);
+        $this->internalFibers->attach($fiber);   // remember it as mine
+        $fiber->start();                          // intercept_fiber returns false -> legacy
+    }
+}
+
+// registered hook:
+'intercept_fiber' => fn (\Fiber $fiber): bool
+    => !$this->internalFibers->contains($fiber),  // mine -> legacy, others -> coroutine
+```
+
+The precedence is therefore: no scheduler -> legacy; scheduler without the hook -> legacy;
+scheduler with the hook -> the hook decides, per fiber.
+
+Unlike the other hooks, `intercept_fiber` receives a real `Fiber` object rather than an opaque
+coroutine: the fiber has not been adopted yet at the moment the decision is made.
+
 #### `shutdown — fn(): bool`
 
 A graceful shutdown has been requested. The implementation stops accepting new work and
