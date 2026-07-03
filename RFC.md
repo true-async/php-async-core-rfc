@@ -105,11 +105,26 @@ final class Async\SchedulerHook
 
     /** The module name of the registered scheduler, or null when none. */
     public static function getModule(): ?string {}
+
+    /**
+     * Switches into a fiber bound to a coroutine and runs it until it
+     * yields or finishes. Returns the yielded value (null on completion).
+     * The scheduler calls this from its suspend hook to continue the
+     * coroutine it selected; the actual context switch is performed by
+     * the engine.
+     */
+    public static function switchTo(\Fiber $fiber): mixed {}
 }
 ```
 
 The hook set is versioned. Future PHP versions may append hooks, and a scheduler written against
 an earlier set remains functional.
+
+The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
+`switchTo()` is the engine primitive that *performs* the switch (mechanism). A scheduler never
+manipulates stacks; it selects a coroutine and asks the engine to continue it. Control returns
+from `switchTo()` when the coroutine yields or finishes, so a complete scheduler loop is:
+dequeue, `switchTo()`, repeat.
 
 ### Hook specification
 
@@ -165,8 +180,11 @@ Async\SchedulerHook::SUSPEND => function (bool $fromMain, bool $isBailout): bool
     while (!$GLOBALS['queue']->isEmpty()) {
         $next = $GLOBALS['queue']->dequeue();
 
-        // Ask the engine to continue $next; control returns here when it yields.
-        // A regular yield needs a single switch; after main, drain the queue.
+        // The engine performs the switch; control returns here when the
+        // coroutine yields. A regular yield needs a single switch; after
+        // main, drain the queue.
+        Async\SchedulerHook::switchTo($next->fiber);
+
         if (!$fromMain) {
             return true;
         }
