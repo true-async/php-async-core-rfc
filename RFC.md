@@ -157,17 +157,22 @@ engine. Two parameters describe the *after-main handover*:
 
 ```php
 Async\SchedulerHook::SUSPEND => function (bool $fromMain, bool $isBailout): bool {
+    // Discard remaining work on abnormal termination.
     if ($isBailout) {
-        return false;                       // discard remaining work on abnormal termination
+        return false;
     }
+
     while (!$GLOBALS['queue']->isEmpty()) {
         $next = $GLOBALS['queue']->dequeue();
-        // request the engine to continue $next; control returns here when it yields
+
+        // Ask the engine to continue $next; control returns here when it yields.
+        // A regular yield needs a single switch; after main, drain the queue.
         if (!$fromMain) {
-            return true;                    // regular yield: a single switch suffices
+            return true;
         }
     }
-    return true;                            // after main: the queue is fully drained
+
+    return true;
 },
 ```
 
@@ -256,19 +261,23 @@ scheduler:
 ```php
 final class Scheduler
 {
-    private \SplObjectStorage $internalFibers;   // the fibers I run myself
+    // The fibers the scheduler runs itself.
+    private \SplObjectStorage $internalFibers;
 
     private function runInternal(\Closure $fn): void
     {
         $fiber = new \Fiber($fn);
-        $this->internalFibers->attach($fiber);   // remember it as mine
-        $fiber->start();                          // intercept_fiber returns false: legacy
+
+        // Remember it as mine, then start it: intercept_fiber returns false,
+        // so it runs in legacy mode.
+        $this->internalFibers->attach($fiber);
+        $fiber->start();
     }
 }
 
-// registered hook:
+// Registered hook: mine run in legacy mode, everything else becomes a coroutine.
 Async\SchedulerHook::INTERCEPT_FIBER => fn (\Fiber $fiber): bool
-    => !$this->internalFibers->contains($fiber),  // mine: legacy, others: coroutine
+    => !$this->internalFibers->contains($fiber),
 ```
 
 The precedence follows from this. With no scheduler, fibers stay legacy. With a scheduler but no
