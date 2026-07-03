@@ -115,11 +115,6 @@ final class Async\SchedulerHook
      */
     public static function defer(callable $task): void {}
 
-    /**
-     * Runs the destructors pending in the current GC destructor phase.
-     * Valid only inside the GC_DESTRUCTORS hook.
-     */
-    public static function runGcDestructors(): bool {}
 }
 ```
 
