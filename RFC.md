@@ -332,6 +332,15 @@ final class Scheduler
 The precedence is therefore: no scheduler -> legacy; scheduler without the hook -> legacy;
 scheduler with the hook -> the hook decides, per fiber.
 
+Because the decision is driven exclusively by the scheduler's own bookkeeping, this design also
+guarantees **isolation**: no code outside the scheduler can interfere with how the scheduler
+runs its internal fibers. Only fibers the scheduler itself created and recorded are treated as
+internal; any fiber originating elsewhere is, by construction, external and therefore subject to
+adoption. Third-party or application code cannot mark a fiber as "internal", cannot smuggle a
+fiber into the scheduler's private set, and thus cannot alter the scheduling of the scheduler's
+own machinery — the engine exposes no such flag, and the set is private to the scheduler
+instance.
+
 Unlike the other hooks, `intercept_fiber` receives a real `Fiber` object rather than an opaque
 coroutine: the fiber has not been adopted yet at the moment the decision is made.
 
