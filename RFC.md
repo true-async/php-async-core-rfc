@@ -237,12 +237,17 @@ Async\SchedulerHook::CONTEXT_UNSET => function (object $ctx, mixed $key): bool {
 },
 ```
 
-#### `intercept_fiber(object $fiber): ?bool`
+#### `intercept_fiber(object $fiber): ?object`
 
-Called by the engine on every `Fiber::start()` while a scheduler is active. It returns `true` to
-adopt the fiber onto the coroutine path (its `Fiber::suspend()`/`resume()` route through the
-scheduler instead of blocking the thread), `false` to keep the fiber in legacy mode, or `null`
-when the hook is not provided, in which case fibers remain legacy.
+The point where the engine links a fiber to a coroutine. There are two kinds of fibers:
+*low-level* ones, pure context switching that Revolt-style loops drive themselves (no coroutine
+involved), and *high-level* ones, a fiber bound to a coroutine and driven by the scheduler.
+
+Called by the engine on every `Fiber::start()` while a scheduler is active, the hook decides
+which kind this fiber is. It returns **the coroutine to bind to the fiber**, created by the
+scheduler, and the fiber then runs on the coroutine path: its `Fiber::suspend()`/`resume()`
+route through the scheduler instead of blocking the thread. Returning `null` keeps the fiber on
+the low-level path. When the hook is not provided, every fiber stays low-level.
 
 **Why this hook is necessary.** Existing concurrency frameworks (ReactPHP/Revolt, AMPHP) are
 themselves implemented on top of fibers. The fiber is the low-level switching primitive their
@@ -254,8 +259,8 @@ into the very scheduler that is trying to run them.
 
 `intercept_fiber` resolves this by letting the scheduler decide **per fiber**, because only the
 scheduler can tell its own machinery apart from application code. A scheduler keeps references to
-the fibers it creates for itself and returns `false` for them, `true` for the rest. No flag is
-placed on the fiber and the engine tracks nothing; the distinction lives entirely in the
+the fibers it creates for itself and returns `null` for them, a fresh coroutine for the rest. No
+flag is placed on the fiber and the engine tracks nothing; the distinction lives entirely in the
 scheduler:
 
 ```php
@@ -268,20 +273,20 @@ final class Scheduler
     {
         $fiber = new \Fiber($fn);
 
-        // Remember it as mine, then start it: intercept_fiber returns false,
-        // so it runs in legacy mode.
+        // Remember it as mine, then start it: intercept_fiber returns null,
+        // so it stays on the low-level path.
         $this->internalFibers->attach($fiber);
         $fiber->start();
     }
 }
 
-// Registered hook: mine run in legacy mode, everything else becomes a coroutine.
-Async\SchedulerHook::INTERCEPT_FIBER => fn (\Fiber $fiber): bool
-    => !$this->internalFibers->contains($fiber),
+// Registered hook: mine stay low-level, everything else gets a coroutine.
+Async\SchedulerHook::INTERCEPT_FIBER => fn (\Fiber $fiber): ?object
+    => $this->internalFibers->contains($fiber) ? null : new MyCoroutine($fiber),
 ```
 
-The precedence follows from this. With no scheduler, fibers stay legacy. With a scheduler but no
-hook, they stay legacy. With the hook, it decides per fiber.
+The precedence follows from this. With no scheduler, fibers stay low-level. With a scheduler but
+no hook, they stay low-level. With the hook, it decides per fiber.
 
 Because the decision is driven exclusively by the scheduler's own bookkeeping, this design also
 guarantees **isolation**: no code outside the scheduler can interfere with how the scheduler runs
