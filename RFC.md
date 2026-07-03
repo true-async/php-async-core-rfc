@@ -55,6 +55,10 @@ presented to the user*.
    production use.
 3. **Strict opt-in.** With no scheduler registered, PHP behaves exactly as it does today, at
    negligible cost.
+4. **Better integration for fiber-based libraries.** Because coroutines are represented natively
+   and a scheduler can adopt fibers onto the coroutine path (see the `intercept_fiber` hook),
+   existing fiber-based libraries — ReactPHP/Revolt, AMPHP — gain a defined way to cooperate
+   with the engine instead of each driving concurrency in isolation.
 
 ## Proposal
 
