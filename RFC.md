@@ -95,8 +95,8 @@ final class Async\SchedulerHook
      */
     public static function register(string $module, array $hooks): bool {}
 
-    /** Returns the callable registered for $hook, or null when unset. */
-    public static function get(string $hook): ?callable {}
+    /** The module name of the registered scheduler, or null when none. */
+    public static function getModule(): ?string {}
 }
 ```
 
