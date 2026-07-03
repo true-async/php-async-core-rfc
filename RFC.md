@@ -92,6 +92,7 @@ final class Async\SchedulerHook
     public const string CONTEXT_FIND    = 'context_find';
     public const string CONTEXT_SET     = 'context_set';
     public const string CONTEXT_UNSET   = 'context_unset';
+    public const string GC_DESTRUCTORS  = 'gc_destructors';
 
     /**
      * Registers a scheduler and activates the concurrent mode.
@@ -114,6 +115,21 @@ final class Async\SchedulerHook
      * the engine.
      */
     public static function switchTo(\Fiber $fiber): mixed {}
+
+    /** Queues a callable to run on the next scheduler tick (one-shot). */
+    public static function defer(callable $task): void {}
+
+    /**
+     * Drains the pending microtasks. The scheduler must call this on
+     * every tick. Returns true when any task ran.
+     */
+    public static function runMicrotasks(): bool {}
+
+    /**
+     * Runs the destructors pending in the current GC destructor phase.
+     * Valid only inside the GC_DESTRUCTORS hook.
+     */
+    public static function runGcDestructors(): bool {}
 }
 ```
 
@@ -125,6 +141,11 @@ The division of labour is strict: the hooks decide *which* coroutine runs next (
 manipulates stacks; it selects a coroutine and asks the engine to continue it. Control returns
 from `switchTo()` when the coroutine yields or finishes, so a complete scheduler loop is:
 dequeue, `switchTo()`, repeat.
+
+The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the engine
+(`defer()` adds to it), and the scheduler's only duty is to drain it on every tick by calling
+`runMicrotasks()`. Tasks queued while draining run within the same drain, the classic microtask
+semantics.
 
 ### Hook specification
 
@@ -316,6 +337,34 @@ own machinery. The engine exposes no such flag, and the set is private to the sc
 
 Unlike the other hooks, `intercept_fiber` receives a real `Fiber` object rather than an opaque
 coroutine, because the fiber has not been adopted yet at the moment the decision is made.
+
+#### `gc_destructors(callable $run): bool`
+
+The around-interceptor for the garbage collector's destructor phase. When the GC reaches the
+point where destructors of collected cycles must run, it calls this hook instead of executing
+the phase directly. `$run` is the engine's own destructor executor: the hook must call it and
+may bracket it with scheduler logic. The canonical use is a completion group: open it before,
+run, then await everything the destructors spawned, including transitive descendants. The
+membership tracking is the scheduler's own bookkeeping; the engine knows nothing about it.
+
+The engine keeps every correctness guarantee for itself: destructors are invoked by the engine
+executor (each exactly once), and after the hook returns the engine re-runs the executor as a
+safety net, so a broken hook cannot prevent destructors from being called. Without the hook the
+classic destructor path runs unchanged.
+
+```php
+Async\SchedulerHook::GC_DESTRUCTORS => function (callable $run) use ($queue): bool {
+    // Before: everything the destructors spawn lands in the scheduler's queue.
+    $run();
+
+    // After: await the spawned work, transitively.
+    while (!$queue->isEmpty()) {
+        Async\SchedulerHook::switchTo($queue->dequeue()->fiber);
+    }
+
+    return true;
+},
+```
 
 #### `shutdown(): bool`
 
