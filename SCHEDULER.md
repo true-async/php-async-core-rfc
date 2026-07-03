@@ -27,6 +27,16 @@ time userland code executes.
 | 5 | `sapi/phpdbg/phpdbg_prompt.c`, around `zend_execute()` | `launch` before, `suspend(fromMain: true, ...)` after | The same pair for the phpdbg SAPI. |
 | 6 | `Zend/zend_fibers.c`, `Fiber::start()` | `intercept_fiber` | The engine asks the scheduler for a coroutine to bind to the starting fiber. A coroutine puts the fiber on the coroutine path; `null` keeps it low-level. |
 | 7 | `Zend/zend_fibers.c`, `Fiber::start()/resume()/throw()` on a bound fiber | `enqueue_coroutine` / `resume`, then `suspend(fromMain: false, ...)` | The fiber operation becomes scheduler policy: park the value (or exception), notify, hand over. The call returns the value the fiber yields. |
+| 8 | `Zend/zend_gc.c`, the destructor phase of `gc_collect_cycles()` | `gc_destructors` | The around-interceptor: the hook receives the engine's destructor executor, brackets it (open a completion group, run, await everything the destructors spawned). A safety net re-runs missed destructors after the hook. Without the hook, the classic path runs unchanged. |
+| 9 | anywhere in the engine or an extension | `defer` (slot) / `DEFER` (hook) | Queue a one-shot microtask on the scheduler's queue. The engine stores nothing: `SchedulerHook::defer()` and C consumers route the task to the provider. |
+
+## Microtasks
+
+The microtask queue is owned by the scheduler, not by the engine. `SchedulerHook::defer()`
+(PHP) and `ZEND_ASYNC_DEFER()` (C, a thin refcounted task structure with a cancel flag) forward
+tasks to the scheduler's DEFER implementation; the scheduler stores them and runs each exactly
+once on its next tick. A cancelled task's handler is never invoked; its destructor releases the
+container when the last reference dies.
 
 ## The Switch Primitive
 
