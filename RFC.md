@@ -109,15 +109,6 @@ final class Async\SchedulerHook
     public static function getModule(): ?string {}
 
     /**
-     * Switches into a fiber bound to a coroutine and runs it until it
-     * yields or finishes. Returns the yielded value (null on completion).
-     * The scheduler calls this from its suspend hook to continue the
-     * coroutine it selected; the actual context switch is performed by
-     * the engine.
-     */
-    public static function switchTo(\Fiber $fiber): mixed {}
-
-    /**
      * Queues a callable on the scheduler's microtask queue (one-shot,
      * runs on the next tick). Forwards to the DEFER hook: the queue and
      * its draining belong to the scheduler.
@@ -136,10 +127,12 @@ The hook set is versioned. Future PHP versions may append hooks, and a scheduler
 an earlier set remains functional.
 
 The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
-`switchTo()` is the engine primitive that *performs* the switch (mechanism). A scheduler never
-manipulates stacks; it selects a coroutine and asks the engine to continue it. Control returns
-from `switchTo()` when the coroutine yields or finishes, so a complete scheduler loop is:
-dequeue, `switchTo()`, repeat.
+the engine performs the switch (mechanism). There is no switching API: the scheduler uses the
+plain Fiber interface. Inside scheduler code (a hook invocation), `start()`/`resume()`/`throw()`
+on a fiber bound to a coroutine performs the direct context switch and returns when the fiber
+yields; in application code the same calls park the value and hand over to the scheduler through
+the hooks. A complete scheduler loop is therefore: dequeue, `$fiber->resume()`, repeat. Nothing
+switchable is reachable from application code.
 
 The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the
 scheduler, not by the engine. `defer()` only forwards the callable to the scheduler's DEFER
@@ -197,12 +190,12 @@ Async\SchedulerHook::SUSPEND => function (bool $fromMain, bool $isBailout): bool
     }
 
     while (!$GLOBALS['queue']->isEmpty()) {
-        $next = $GLOBALS['queue']->dequeue();
+        $fiber = $GLOBALS['queue']->dequeue()->fiber;
 
-        // The engine performs the switch; control returns here when the
-        // coroutine yields. A regular yield needs a single switch; after
-        // main, drain the queue.
-        Async\SchedulerHook::switchTo($next->fiber);
+        // Inside a hook this is a direct switch; control returns here
+        // when the fiber yields. A regular yield needs a single switch;
+        // after main, drain the queue.
+        $fiber->isStarted() ? $fiber->resume() : $fiber->start();
 
         if (!$fromMain) {
             return true;
@@ -370,7 +363,8 @@ Async\SchedulerHook::GC_DESTRUCTORS => function (callable $run) use ($queue): bo
 
     // After: await the spawned work, transitively.
     while (!$queue->isEmpty()) {
-        Async\SchedulerHook::switchTo($queue->dequeue()->fiber);
+        $fiber = $queue->dequeue()->fiber;
+        $fiber->isStarted() ? $fiber->resume() : $fiber->start();
     }
 
     return true;
