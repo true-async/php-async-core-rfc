@@ -38,17 +38,19 @@ tasks to the scheduler's DEFER implementation; the scheduler stores them and run
 once on its next tick. A cancelled task's handler is never invoked; its destructor releases the
 container when the last reference dies.
 
-## The Switch Primitive
+## Switching
 
 The hooks decide *which* coroutine runs next; the engine performs the switch.
-`Async\SchedulerHook::switchTo(Fiber $fiber): mixed` (backed by
-`zend_fiber_switch_to_coroutine()`) switches into a fiber bound to a
-coroutine, runs it until it yields or finishes, updates the coroutine
-lifecycle status, and returns the yielded value. A complete scheduler loop is:
-dequeue, `switchTo()`, repeat.
+There is no switching API. Inside scheduler code (any hook invocation, marked
+by the in_scheduler_context flag in the async globals), the plain Fiber API on
+a bound fiber performs the direct context switch: `$fiber->resume()` runs the
+fiber until it yields or finishes and updates the coroutine lifecycle status.
+In application code the same calls park the value and route through the hooks
+instead. The flag is cleared while application code runs: the fiber body, and
+each destructor invoked during the GC phase.
 
 `Fiber::suspend()` needs no coroutine-mode changes: the switch goes back to
-the resumer, which on the coroutine path is the scheduler's `switchTo()` call.
+the resumer, which on the coroutine path is the scheduler's own resume call.
 
 ## Resulting Request Lifecycle
 
