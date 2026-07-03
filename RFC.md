@@ -4,7 +4,7 @@
 - **Date:** 2026-07-02
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
-- **Implementation:** https://github.com/true-async/php-src/tree/async-core
+- **Implementation:** https://github.com/true-async/php-src/pull/13
 - **Discussion thread:** tbd
 - **Voting thread:** tbd
 
