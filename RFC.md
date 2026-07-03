@@ -21,14 +21,14 @@ The proposal is based on the implementation experience of the
 [TrueAsync project](https://github.com/true-async) — a complete concurrency stack for PHP
 (scheduler, libuv reactor, thread pool) — and introduces a universal interface: coroutines
 become a native engine concept, and the component that drives them — the scheduler — becomes
-pluggable. A C extension or a PHP library registers a set of hooks through a single function;
+pluggable. A C extension or a PHP library registers a set of hooks through a single call;
 from that point on, PHP operates concurrently.
 
 ```php
-async_scheduler_register('my-scheduler', false, [
-    'enqueue_coroutine' => enqueue(...),   // a coroutine is ready to run
-    'suspend'           => suspend(...),   // the current flow yields: select the next coroutine
-    'resume'            => resume(...),    // wake a suspended coroutine
+Async\SchedulerHook::register('my-scheduler', [
+    Async\SchedulerHook::ENQUEUE => enqueue(...),   // a coroutine is ready to run
+    Async\SchedulerHook::SUSPEND => suspend(...),   // the current flow yields: pick the next
+    Async\SchedulerHook::RESUME  => resume(...),    // wake a suspended coroutine
 ]);
 ```
 
@@ -79,18 +79,25 @@ registered scheduler does.
 ### Registration
 
 ```php
-/**
- * Registers a concurrency scheduler and activates the concurrent mode.
- *
- * $hooks maps hook names to callables; omitted hooks retain their default
- * implementations. Returns false when a PHP scheduler is already registered
- * and $allowOverride is false.
- *
- * When the scheduler has been registered by a C extension, calling this
- * function is prohibited and throws an Error: a C scheduler owns
- * concurrency for the entire process and cannot be replaced from PHP.
- */
-function async_scheduler_register(string $module, bool $allowOverride, array $hooks): bool {}
+final class Async\SchedulerHook
+{
+    // Hook-name constants used as the array keys (LAUNCH, SHUTDOWN,
+    // INTERCEPT_FIBER, ENQUEUE, SUSPEND, RESUME, CANCEL,
+    // CONTEXT_FIND, CONTEXT_SET, CONTEXT_UNSET).
+
+    /**
+     * Registers a scheduler and activates the concurrent mode.
+     *
+     * $hooks maps a hook constant to a callable; omitted hooks retain their
+     * default implementations. A scheduler is registered exactly once per
+     * process: calling this when one is already registered — by a C
+     * extension or by an earlier PHP call — throws an Error.
+     */
+    public static function register(string $module, array $hooks): bool {}
+
+    /** Returns the callable registered for $hook, or null when unset. */
+    public static function get(string $hook): ?callable {}
+}
 ```
 
 The hook set is versioned. Future PHP versions may append hooks; a scheduler written against an
@@ -380,8 +387,8 @@ silently discard that work: the scheduler defines the semantics of the end of th
 
 ## Backward Incompatible Changes
 
-One function is added to the global namespace: `async_scheduler_register()`. Code declaring a
-function with this exact name would break; no significant usage is known.
+One class is added: `Async\SchedulerHook`. Code declaring a class with this exact name in the
+`Async\` namespace would break; no significant usage is known.
 
 No other observable changes are introduced: with no scheduler registered, PHP behaves exactly
 as before.
