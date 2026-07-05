@@ -26,7 +26,7 @@ events. Something has to tell it "socket #7 is readable now", "the 200 ms timer 
 **reactor**.
 
 ```
-   OS            ->   Reactor          ->   Scheduler        ->   Coroutine
+   OS  ─────────────►  Reactor  ─────────────►  Scheduler  ─────────────►  Coroutine
  (epoll/kqueue/       (async_io_* API,             (RESUME /             (resumes at its
   IOCP/io_uring)       this document)         ENQUEUE hooks)        suspension point)
 ```
@@ -317,7 +317,7 @@ integration point: an extension takes a stream a script already opened and drive
 the `async_io_*` API, or exposes an `async_io_*` handle back to the script as an ordinary stream.
 
 ```c
-/* PHP stream -> io handle. Wrap an existing php_stream in an async_io_handle_t bound
+/* PHP stream ─► io handle. Wrap an existing php_stream in an async_io_handle_t bound
  * to its underlying fd/socket, so the core can read/write it asynchronously.
  * The reactor does NOT take ownership of the fd unless ASYNC_IO_F_OWNS_FD is passed;
  * closing the io handle detaches, leaving the php_stream usable synchronously
@@ -325,7 +325,7 @@ the `async_io_*` API, or exposes an `async_io_*` handle back to the script as an
  * Returns NULL if the stream has no pollable descriptor (e.g. a memory stream). */
 async_io_handle_t *async_io_from_stream(php_stream *stream, uint32_t flags);
 
-/* io handle -> PHP stream. Expose an async_io_handle_t to userland as a normal
+/* io handle ─► PHP stream. Expose an async_io_handle_t to userland as a normal
  * php_stream, so io-based core code can hand a script something it can fread()/
  * fwrite()/stream_select() like any other stream. The stream's operations route
  * through the reactor; blocking reads suspend the current coroutine (§9). */
@@ -663,7 +663,7 @@ flow. Note the drained read: because `async_io_close` is asynchronous, bytes the
 are delivered before the close rather than dropped.
 
 ```
-async_io_close(h)  ->  drain kernel  ->  [final read cb]  ->  close fd  ->  close_cb  ->  async_io_dispose(h)
+async_io_close(h) ─► drain kernel ─► [final read cb] ─► close fd ─► close_cb ─► async_io_dispose(h)
                                    (already-read bytes)              (last call)   (memory gone)
 ```
 
