@@ -323,21 +323,21 @@ the `io_*` API, or exposes an `io_*` handle back to the script as an ordinary st
  * closing the io handle detaches, leaving the php_stream usable synchronously
  * (this is exactly what the on_detach hook on zend_async_io_t already does).
  * Returns NULL if the stream has no pollable descriptor (e.g. a memory stream). */
-io_handle_t *io_stream_import(php_stream *stream, uint32_t flags);
+io_handle_t *io_from_stream(php_stream *stream, uint32_t flags);
 
 /* io handle -> PHP stream. Expose an io_handle_t to userland as a normal
  * php_stream, so io-based core code can hand a script something it can fread()/
  * fwrite()/stream_select() like any other stream. The stream's operations route
  * through the reactor; blocking reads suspend the current coroutine (§9). */
-php_stream *io_stream_export(io_handle_t *h);
+php_stream *io_to_stream(io_handle_t *h);
 ```
 
-`io_stream_import` is how a builtin like `fread($sock)` becomes non-blocking: pull the fd out
-of the `php_stream`, wrap it, `io_read` + suspend (§9.1), and on completion copy back into the
-stream's buffer. `io_stream_export` is the reverse, letting a reactor-native connection (say
-an accepted socket from an async listener) be returned to PHP as a plain stream resource. The
-pair keeps the huge existing surface of stream wrappers working while the actual I/O moves onto
-the event loop.
+`io_from_stream` is how a builtin like `fread($sock)` becomes non-blocking: pull the fd
+out of the `php_stream`, wrap it, `io_read` + suspend (§9.1), and on completion copy back into
+the stream's buffer. `io_to_stream` is the reverse, letting a reactor-native connection
+(say an accepted socket from an async listener) be returned to PHP as a plain stream resource.
+The pair keeps the huge existing surface of stream wrappers working while the actual I/O moves
+onto the event loop.
 
 ---
 
