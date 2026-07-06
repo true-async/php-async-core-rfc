@@ -1,42 +1,49 @@
 # Pure-PHP scheduler example
 
-A complete, minimal demonstration of the **Async Scheduler Hook API** written
-entirely in PHP, on top of plain `Fiber`. It shows that once a scheduler is
-registered, ordinary fibers become cooperatively-scheduled coroutines that
-really switch — including a switch driven from the main flow.
+A minimal, self-contained scheduler written entirely in PHP on top of the
+**Async Scheduler Hook API**, plus an example that uses it. It shows that once
+a scheduler is registered, ordinary `Fiber`s become cooperatively-scheduled
+coroutines that really switch.
 
 Needs a PHP built with the async core (the
 [`async-core`](https://github.com/php/php-src/pull/22561) branch).
 
-## The scheduler in one file
+## The module
 
-[`CooperativeScheduler.php`](CooperativeScheduler.php) is the whole driver: a
-run queue plus four hooks. Each hook maps an *engine event* to a *scheduling
-policy*:
+[`CooperativeScheduler.php`](CooperativeScheduler.php) is the whole driver and
+nothing else. Including it registers the scheduler; it exposes two functions,
+the pure-PHP twins of ext/async's `Async\spawn()` / `Async\suspend()`:
 
-| Hook | Speaking method | Policy |
-|------|-----------------|--------|
-| `INTERCEPT_FIBER` | `adoptFiber()`        | wrap a starting fiber into a coroutine handle |
-| `ENQUEUE` / `RESUME` | `markReady()`      | put a runnable coroutine at the tail of the queue |
-| `SUSPEND` | `runUntilAllIdle()`           | the current flow yields — switch into ready coroutines |
-| `DEFER` | `queueMicrotask()`              | store a one-shot microtask (used e.g. by a concurrent iterator) |
+```php
+Cooperative\spawn(callable $task, mixed ...$args);  // start a coroutine
+Cooperative\suspend();                              // cooperative yield
+```
+
+Internally it is four hooks over two queues (closures capturing the queues via
+`use`):
+
+| Hook | Policy |
+|------|--------|
+| `INTERCEPT_FIBER` | wrap a starting fiber into a coroutine handle |
+| `ENQUEUE` / `RESUME` | put a runnable coroutine at the tail of the queue |
+| `DEFER` | store a one-shot microtask (used e.g. by a concurrent iterator) |
+| `SUSPEND` | the current flow yields — run the queued coroutines |
 
 The context switch itself is never hand-rolled: inside the scheduler it is just
 `$fiber->start()` / `$fiber->resume()`, which the engine turns into a direct
-switch.
+switch. `SUSPEND` also receives `bool $isBailout`, so the scheduler can choose
+to complete or drop the pending coroutines when the main flow ends abnormally.
 
-## Demo 1 — coroutines interleave
+## The example
 
-[`run.php`](run.php) spawns two coroutines that each do a few steps and yield
-after every step. They run **concurrently**, interleaved step by step:
+[`interleaving.php`](interleaving.php) spawns two coroutines that each do a few
+steps and yield after every step. They run **concurrently**, interleaved step
+by step:
 
 ```
-$ php example/run.php
-main: starting, about to spawn two coroutines
-main: both coroutines are queued but not finished yet
-main: reaching the end of the script
-main: --- handover to scheduler ---
-    [microtask] ran on the scheduler tick
+$ php example/interleaving.php
+main: spawning two coroutines
+main: end of script — handing control to the scheduler
     [A] step 1 of 3
     [B] step 1 of 2
     [A] step 2 of 3
@@ -46,34 +53,8 @@ main: --- handover to scheduler ---
     [A] finished
 ```
 
-`A, B, A, B, …` alternating is the proof: control is switching between the two
-fibers. When the script ends, the engine hands control to the scheduler one
-last time (`SUSPEND` with `fromMain = true`) and the queued coroutines run to
-completion.
-
-## Demo 2 — switching from the main flow
-
-[`switch_from_main.php`](switch_from_main.php) steps a single coroutine by hand
-from the main script, so you can watch control bounce **main → coroutine →
-main**, with values passed both ways:
-
-```
-$ php example/switch_from_main.php
-main: switch INTO the coroutine
-    [coroutine] counting 3
-main: control is back; coroutine handed me 3
-
-main: switch back into the coroutine
-    [coroutine] counting 2
-main: control is back; coroutine handed me 2
-
-main: switch back into the coroutine
-    [coroutine] counting 1
-main: control is back; coroutine handed me 1
-
-main: one more switch; this time the coroutine returns
-main: coroutine finished with: lift-off
-```
-
-Every `main → coroutine → main` line pair is one real context switch initiated
-from the main flow.
+The alternating `A, B, A, B, …` is the proof that control switches between the
+two fibers. Nothing runs while the main script executes; when it ends, the
+engine hands control to the scheduler (`SUSPEND` with `fromMain = true`) and the
+queued coroutines run to completion — that hand-off is the main flow switching
+into the coroutines.
