@@ -4,7 +4,7 @@
 - **Date:** 2026-07-02
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
-- **Implementation:** https://github.com/true-async/php-src/pull/13
+- **Implementation:** https://github.com/php/php-src/pull/22561
 - **Discussion thread:** tbd
 - **Voting thread:** tbd
 
@@ -92,7 +92,6 @@ final class Async\SchedulerHook
     public const string CONTEXT_FIND    = 'context_find';
     public const string CONTEXT_SET     = 'context_set';
     public const string CONTEXT_UNSET   = 'context_unset';
-    public const string GC_DESTRUCTORS  = 'gc_destructors';
     public const string DEFER           = 'defer';
 
     /**
@@ -118,8 +117,10 @@ final class Async\SchedulerHook
 }
 ```
 
-The hook set is versioned. Future PHP versions may append hooks, and a scheduler written against
-an earlier set remains functional.
+The hook set is not versioned separately: it evolves together with the standard PHP module API
+(`ZEND_MODULE_API_NO`), so there is no independent async/scheduler ABI number to maintain. Future
+PHP versions may append hooks, and a scheduler built against an earlier module API remains
+functional.
 
 The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
 the engine performs the switch (mechanism). There is no switching API: the scheduler uses the
@@ -337,35 +338,6 @@ Async\SchedulerHook::DEFER => function (callable $task) use ($tasks): bool {
 },
 ```
 
-#### `gc_destructors(callable $run): bool`
-
-The around-interceptor for the garbage collector's destructor phase. When the GC reaches the
-point where destructors of collected cycles must run, it calls this hook instead of executing
-the phase directly. `$run` is the engine's own destructor executor: the hook must call it and
-may bracket it with scheduler logic. The canonical use is a completion group: open it before,
-run, then await everything the destructors spawned, including transitive descendants. The
-membership tracking is the scheduler's own bookkeeping; the engine knows nothing about it.
-
-The engine keeps every correctness guarantee for itself: destructors are invoked by the engine
-executor (each exactly once), and after the hook returns the engine re-runs the executor as a
-safety net, so a broken hook cannot prevent destructors from being called. Without the hook the
-classic destructor path runs unchanged.
-
-```php
-Async\SchedulerHook::GC_DESTRUCTORS => function (callable $run) use ($queue): bool {
-    // Before: everything the destructors spawn lands in the scheduler's queue.
-    $run();
-
-    // After: await the spawned work, transitively.
-    while (!$queue->isEmpty()) {
-        $fiber = $queue->dequeue()->fiber;
-        $fiber->isStarted() ? $fiber->resume() : $fiber->start();
-    }
-
-    return true;
-},
-```
-
 #### `shutdown(): bool`
 
 A graceful shutdown has been requested. The implementation stops accepting new work and
@@ -400,6 +372,20 @@ directly:
   returns a human-readable description of what it is waiting for (`"socket #7 (readable)"`), used
   by introspection tooling and deadlock reports. It is a per-coroutine handler, not a scheduler
   registration.
+- **Destructor-phase interception** (`gc_destructors`). The around-interceptor for the garbage
+  collector's destructor phase: when the GC reaches the point where destructors of collected
+  cycles must run, it can call this instead of executing the phase directly, bracket it (open a
+  completion group, run, await everything the destructors spawned, including transitive
+  descendants) and only then let collection proceed. **This is reserved for C extensions and is
+  not available to PHP-land, by nature of *when* it runs.** The destructor phase fires at the
+  very latest stage of the request — during and after the teardown of global variables and the
+  object store — when userland is already being dismantled and no PHP-registered scheduler can be
+  safely re-entered. Only C code lives at that stage, so only a C-implemented scheduler (or the
+  engine itself) may hook it; a pure-PHP scheduler cannot. The engine keeps every correctness
+  guarantee regardless: destructors are invoked by the engine executor (each exactly once), and
+  after the interceptor returns the engine re-runs the executor as a safety net, so a broken or
+  absent hook cannot prevent destructors from being called. Without it, the classic synchronous
+  destructor path runs unchanged, and userland `__destruct` always takes that classic path.
 
 ### Engine invocation points
 
