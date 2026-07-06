@@ -80,10 +80,10 @@ function suspend(): void
 
                 // Normal end of script: run everyone to completion, fairly.
                 while (!$microtasks->isEmpty() || !$ready->isEmpty()) {
-
                     while (!$microtasks->isEmpty()) {
                         ($microtasks->dequeue())();
                     }
+
                     if ($ready->isEmpty()) {
                         break;
                     }
