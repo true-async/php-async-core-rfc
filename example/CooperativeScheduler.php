@@ -18,18 +18,17 @@ final class CooperativeScheduler
     /** One-shot callbacks queued via SchedulerHook::defer() (microtasks). */
     private SplQueue $microtasks;
 
+    /**
+     * Creating the scheduler turns PHP into concurrent mode: the constructor
+     * registers the hooks, so from this point on every fiber the program
+     * starts is routed through them. The engine keeps the hook closures (they
+     * are bound to $this), so the object stays alive on its own.
+     */
     public function __construct()
     {
         $this->readyCoroutines = new SplQueue();
         $this->microtasks      = new SplQueue();
-    }
 
-    /**
-     * Turn PHP into concurrent mode. From this point on every fiber the
-     * program starts is routed through the hooks below.
-     */
-    public function activate(): void
-    {
         Async\SchedulerHook::register('cooperative-demo', [
             // A fiber is starting: adopt it as a coroutine of this scheduler.
             Async\SchedulerHook::INTERCEPT_FIBER => $this->adoptFiber(...),

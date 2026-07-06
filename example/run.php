@@ -13,8 +13,9 @@
 
 require __DIR__ . '/CooperativeScheduler.php';
 
-// Activate concurrency. Every fiber started from now on is scheduled.
-(new CooperativeScheduler())->activate();
+// Activate concurrency: creating the scheduler registers it. Every fiber
+// started from now on is scheduled.
+new CooperativeScheduler();
 
 /**
  * A coroutine body: it does `$steps` units of work and cooperatively
