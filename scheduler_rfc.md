@@ -79,56 +79,79 @@ registered scheduler does.
 namespace Async;
 
 /**
+ * Base cancellation exception. Extends \Error on purpose (not \Exception), so a
+ * stray catch (\Exception) cannot swallow a cancellation. To cancel a coroutine,
+ * resume it with one of these — the throwable is raised at the coroutine's
+ * suspension point. There is no separate cancel hook.
+ */
+class CancellationError extends \Error {}
+
+/**
+ * A symmetric execution context. Created via the createCoroutine capability and
+ * switched via switchTo (see onLaunch). Opaque to userland — the scheduler owns
+ * what a coroutine *is*. Internally it is backed by the engine's Fiber machinery,
+ * so it stays compatible with fiber-aware tooling (e.g. Xdebug).
+ */
+final class Continuation { /* opaque */ }
+
+/**
  * A scheduler implements this interface and hands an instance to
- * SchedulerHook::register(). Each method is a scheduling *policy* hook; the
- * engine performs the actual context switches. Extend AbstractScheduler to
- * override only the hooks you need (enqueue() and suspend() are required).
+ * SchedulerHook::register(). The `on*` methods are *event callbacks* the engine
+ * invokes; the engine performs the actual context switches. Extend
+ * AbstractScheduler to override only the hooks you need.
  */
 interface Scheduler
 {
-    /** A coroutine became runnable (freshly created, or its wait ended). */
-    public function enqueue(object $coroutine): bool;
-
     /**
-     * The current flow yields; pick who runs next and switch to them. Return
-     * the coroutine that is now current (or null) — the core records it as the
-     * current coroutine.
+     * The scheduler starts. The engine hands over its privileged, otherwise
+     * unreachable capabilities — the "mandate" — as plain closures. Because they
+     * arrive only here, only the scheduler ever holds them: no other code can
+     * switch contexts or mint coroutines.
      */
-    public function suspend(bool $fromMain, bool $isBailout): ?object;
-
-    /** A fiber is starting: return a coroutine object to adopt it, or null. */
-    public function interceptFiber(\Fiber $fiber): ?object;
-
-    /** Wake a suspended coroutine (deferred: enqueue it to run later). */
-    public function resume(object $coroutine, ?\Throwable $error = null): bool;
-
-    /** Cancel a coroutine. */
-    public function cancel(object $coroutine, ?\Throwable $error = null): bool;
-
-    /** Store a one-shot microtask on the scheduler's queue. */
-    public function defer(callable $task): bool;
-
-    /**
-     * Invoked once when the scheduler starts. Return the coroutine that is now
-     * current (or null) — the core records it, same as suspend().
-     */
-    public function launch(): ?object;
+    public function onLaunch(
+        \Closure $switchTo,          // switchTo(Continuation $to, mixed $value = null): mixed
+        \Closure $createCoroutine,   // createCoroutine(callable $entry): Continuation
+        \Closure $currentCoroutine,  // currentCoroutine(): ?Continuation
+    ): void;
 
     /** A graceful shutdown has been requested. */
-    public function shutdown(): bool;
+    public function onShutdown(): bool;
 
-    // --- Context: key/value storage bound to a coroutine. Two separate
-    //     stores per coroutine, each fetched by these getters, then operated
-    //     on with the find/set/unset hooks below. ---
+    /**
+     * A foreign Fiber (created by application/third-party code, e.g.
+     * Revolt/AMPHP) is starting. Return a Continuation to adopt it onto the
+     * coroutine path, or null to leave it low-level.
+     */
+    public function onFiber(\Fiber $fiber): ?Continuation;
 
-    /** The coroutine's userland context (string/object keys). */
-    public function getContext(object $coroutine): ?object;
+    /** A coroutine became runnable (created, or its wait ended). */
+    public function onEnqueue(Continuation $coroutine): bool;
 
-    /** The coroutine's internal context (numeric keys, reserved for C extensions). */
-    public function getInternalContext(object $coroutine): ?object;
+    /**
+     * The current flow yields. Pick who runs next and switch to them with the
+     * switchTo mandate. `$current` is the coroutine that just yielded.
+     */
+    public function onSuspend(Continuation $current): void;
 
-    /** Userland context operations (string/object keys). */
-    public function contextFind(object $context, mixed $key, bool $includeParent): mixed;
+    /**
+     * Wake a suspended coroutine (deferred: re-queue it). When `$error` is a
+     * CancellationError (or any throwable), it is raised at the coroutine's
+     * suspension point — that is how cancellation is delivered.
+     */
+    public function onResume(Continuation $coroutine, ?\Throwable $error = null): bool;
+
+    /** Store a one-shot microtask on the scheduler's queue. */
+    public function onDefer(callable $task): bool;
+
+    // --- Coroutine context (queries/providers — not events, so no on-prefix) ---
+
+    /** The coroutine's userland context (string/object keys), or null. */
+    public function getContext(Continuation $coroutine): ?object;
+
+    /** The coroutine's internal context (numeric keys, for C extensions), or null. */
+    public function getInternalContext(Continuation $coroutine): ?object;
+
+    public function contextFind(object $context, mixed $key): mixed;
     public function contextSet(object $context, mixed $key, mixed $value): bool;
     public function contextUnset(object $context, mixed $key): bool;
 }
@@ -151,7 +174,7 @@ final class SchedulerHook
 
     /**
      * Queues a callable on the scheduler's microtask queue (one-shot, runs on
-     * the next tick). Forwards to the scheduler's defer() hook.
+     * the next tick). Forwards to the scheduler's onDefer() hook.
      */
     public static function defer(callable $task): void {}
 }
@@ -180,6 +203,50 @@ part of this RFC** — like the coroutine object itself, it belongs to the sched
 The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the
 scheduler, not by the engine. `defer()` only forwards the callable to the scheduler's DEFER
 hook; storage, draining and the exact semantics are the scheduler's policy.
+
+### Design rationale
+
+**Why an interface (a class), not an array of callables.** An earlier draft
+registered a `[hook => callable]` map. An interface is better on every axis: the
+implementation is a real object, so the hooks share state through `$this` instead
+of a web of `use`-captured variables; the contract is *typed* and checked at
+compile time (a wrong signature is an error, not a run-time surprise); `AbstractScheduler`
+supplies defaults so a scheduler overrides only what it needs; and the hook set
+evolves by adding interface methods, versioned together with the module API. It
+also reads the way engine integration points already look (`SessionHandlerInterface`,
+`Countable`, …).
+
+**Why the `on*` prefix.** Every method here is a *callback the engine invokes* on
+an event — not something the scheduler calls. Naming them `onSuspend`, `onResume`,
+`onFiber`, … makes that direction unmistakable and separates them from the
+scheduler's own API (`spawn()`, `await()`) and from the query-style methods that
+return data (`getContext`, `contextFind`), which keep no prefix precisely because
+they are questions the engine asks, not events it announces.
+
+**Why the mandate is passed as hidden closures.** Switching contexts and minting
+coroutines are dangerous, privileged operations: if they were globally callable,
+any code could jump between coroutines and corrupt the run state. Instead the
+engine hands `switchTo` / `createCoroutine` / `currentCoroutine` to `onLaunch()`
+as plain closures. They arrive **once**, **only** to the scheduler, and live only
+in its private fields — a capability, not ambient authority. No global function,
+no static method: nobody but the registered scheduler can ever switch a context.
+
+**Continuation vs Fiber, and why it optimizes switching.** `Fiber` is *asymmetric*:
+`resume()`/`suspend()` are coupled, so a fiber can only yield back to whoever
+resumed it. To move from coroutine A to coroutine B you must bounce through a
+central pump: `A → scheduler → B`, two switches and a round-trip through the loop
+for every hop. `Continuation` is *symmetric*: `switchTo(B)` transfers control
+**directly** from A to B — one switch, no pump, no intermediary. For workloads
+that hand off between coroutines constantly (channels, generators, pipelines) this
+halves the number of context switches on the hot path.
+
+**Continuation is Xdebug-compatible.** A `Continuation` is not a parallel,
+opaque stack the debugger cannot see: internally it is built on the engine's own
+`zend_fiber_context` — the exact primitive the `Fiber` API uses. The symmetric
+`switchTo` is just a different *scheduling discipline* over the same underlying
+fiber machinery, so step debugging, stack traces, and fiber-aware tooling such as
+Xdebug keep working. Symmetric switching buys performance without giving up the
+observability the fiber infrastructure already provides.
 
 ### Hook specification
 
