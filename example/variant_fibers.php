@@ -93,7 +93,7 @@ function currentCoroutine(): object
 /** Yield: reschedule self, then suspend back to the pump. */
 function yield_(): void
 {
-    Async\Coroutine::resume(currentCoroutine());
+    FiberScheduler::$instance->resume(currentCoroutine());
     Fiber::suspend();
 }
 

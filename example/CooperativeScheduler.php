@@ -134,11 +134,11 @@ function currentCoroutine(): object
 /** Cooperative yield: reschedule the current coroutine, then let others run. */
 function park(): void
 {
-    Async\Coroutine::resume(currentCoroutine());
+    CooperativeScheduler::$instance->resume(currentCoroutine());
     Fiber::suspend();
 }
 
-/** Await: suspend until someone calls Async\Coroutine::resume() on us. */
+/** Await: suspend until the scheduler resumes us. */
 function await(): void
 {
     Fiber::suspend();

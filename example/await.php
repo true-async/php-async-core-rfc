@@ -5,8 +5,8 @@
  *
  *   php example/await.php
  *
- * A coroutine takes a handle to itself with Async\Coroutine::current(), then
- * suspends. Another coroutine wakes it with Async\Coroutine::resume() — a
+ * A coroutine takes a handle to itself via the scheduler (currentCoroutine), then
+ * suspends. Another coroutine wakes it through the scheduler (resume) — a
  * *deferred* wake that hands the coroutine back to the scheduler to be run
  * later, never an immediate `$fiber->resume()`. That is what keeps a fiber from
  * being resumed while it is still on another fiber's stack (which would throw
@@ -43,7 +43,7 @@ final class Future
         $this->ready = true;
 
         if ($this->waiter !== null) {
-            Async\Coroutine::resume($this->waiter);   // deferred wake
+            CooperativeScheduler::$instance->resume($this->waiter);   // deferred wake
             $this->waiter = null;
         }
     }
