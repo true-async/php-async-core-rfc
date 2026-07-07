@@ -122,10 +122,10 @@ interface Scheduler
     //     on with the find/set/unset hooks below. ---
 
     /** The coroutine's userland context (string/object keys). */
-    public function getContext(object $coroutine): object;
+    public function getContext(object $coroutine): ?object;
 
     /** The coroutine's internal context (numeric keys, reserved for C extensions). */
-    public function getInternalContext(object $coroutine): object;
+    public function getInternalContext(object $coroutine): ?object;
 
     /** Userland context operations (string/object keys). */
     public function contextFind(object $context, mixed $key, bool $includeParent): mixed;
@@ -289,7 +289,7 @@ public function cancel(object $coroutine, ?Throwable $error = null): bool
 }
 ```
 
-#### `getContext(object $coroutine): object` / `getInternalContext(object $coroutine): object`
+#### `getContext(object $coroutine): ?object` / `getInternalContext(object $coroutine): ?object`
 
 Each coroutine is associated with two *execution-flow contexts*: key/value storage that follows
 the logical chain of execution. The **userland** context uses string/object keys (request id,
@@ -298,7 +298,7 @@ keyed by process-unique numeric keys. These getters return the context object a 
 to, which is then operated on with the find/set/unset hooks below.
 
 ```php
-public function getContext(object $coroutine): object
+public function getContext(object $coroutine): ?object
 {
     return $coroutine->context ??= new Context();
 }
