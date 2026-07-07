@@ -1,14 +1,14 @@
 <?php
 
 /**
- * Why the scheduler funnels every switch through one central pump.
+ * Why the scheduler funnels every switch through one central point (the scheduler).
  *
  *   php example/fiber_switch_limit.php
  *
  * Plain fibers (no scheduler in this file) obey a strict stack discipline:
  * a fiber can only suspend to its *immediate* resumer, and a fiber that is
  * currently running cannot be resumed at all. Build a 4-deep hierarchy and
- * both limits show up — this is exactly what a central pump avoids.
+ * both limits show up — this is exactly what routing through the scheduler avoids.
  */
 
 // --- 1. A deep suspend lands on the "wrong" fiber -----------------------

@@ -7,7 +7,7 @@ API, so the two switching disciplines can be compared side by side.
 
 Coroutines are `Fiber`s. The scheduler drives them with `$fiber->resume()`, and a
 coroutine yields with `Fiber::suspend()`, which returns to the resumer. Every
-switch goes `coroutine → scheduler ({main}) → coroutine`: a central pump, never a
+switch goes `coroutine → scheduler ({main}) → coroutine`: the scheduler as a central hub, never a
 direct coroutine-to-coroutine jump. **Runs on today's engine.**
 
 - [`CooperativeScheduler.php`](fibers/CooperativeScheduler.php) — the driver
@@ -15,14 +15,14 @@ direct coroutine-to-coroutine jump. **Runs on today's engine.**
 - [`await.php`](fibers/await.php) — awaiting a value across coroutines (a Future)
 - [`nested.php`](fibers/nested.php) — a coroutine spawns a coroutine
 - [`fiber_switch_limit.php`](fibers/fiber_switch_limit.php) — the fiber stack rule
-  the central pump exists to avoid
+  the scheduler-as-hub design exists to avoid
 
 ## [`continuation/`](continuation/) — Continuation (symmetric)
 
 The same scheduler via the *additional* `Continuation` API: coroutines are
 `Continuation`s (minted by the scheduler through the `createCoroutine` mandate),
 and the scheduler switches **directly** A → B with `switchTo` — one switch, no
-pump. Switching is a privilege handed only to the scheduler at `onLaunch`.
+intermediary. Switching is a privilege handed only to the scheduler at `onLaunch`.
 
 **Illustrative:** uses the proposed `Continuation` / `switchTo` primitives, which
 are not in the engine yet, so this documents the design; it is not runnable until

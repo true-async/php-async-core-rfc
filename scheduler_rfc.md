@@ -234,9 +234,9 @@ no static method: nobody but the registered scheduler can ever switch a context.
 **Continuation vs Fiber, and why it optimizes switching.** `Fiber` is *asymmetric*:
 `resume()`/`suspend()` are coupled, so a fiber can only yield back to whoever
 resumed it. To move from coroutine A to coroutine B you must bounce through a
-central pump: `A → scheduler → B`, two switches and a round-trip through the loop
+the scheduler as intermediary: `A → scheduler → B`, two switches and a round-trip through the loop
 for every hop. `Continuation` is *symmetric*: `switchTo(B)` transfers control
-**directly** from A to B — one switch, no pump, no intermediary. For workloads
+**directly** from A to B — one switch, no intermediary. For workloads
 that hand off between coroutines constantly (channels, generators, pipelines) this
 halves the number of context switches on the hot path.
 
