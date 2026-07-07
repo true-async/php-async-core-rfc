@@ -76,11 +76,9 @@ final class CooperativeScheduler extends \Async\AbstractScheduler
             $coroutine = $this->ready->dequeue();
             $fiber     = $coroutine->fiber;
 
-            // Tell the engine which coroutine is now current, then switch into
-            // it. Inside scheduler code start()/resume() switch directly.
-            \Async\Coroutine::setCurrent($coroutine);
+            // The real context switch: inside scheduler code start() / resume()
+            // switch directly instead of re-entering the hooks.
             $fiber->isStarted() ? $fiber->resume() : $fiber->start();
-            \Async\Coroutine::setCurrent(null);   // back in the pump: no coroutine is current
 
             // A suspended coroutine is NOT auto-rescheduled: it is only queued
             // again when someone resumes it (park() reschedules itself; an
