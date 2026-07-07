@@ -10,29 +10,52 @@ Needs a PHP built with the async core (the
 
 ## The module
 
-[`CooperativeScheduler.php`](CooperativeScheduler.php) is the whole driver and
-nothing else. Including it registers the scheduler; it exposes two functions,
-the pure-PHP twins of ext/async's `Async\spawn()` / `Async\suspend()`:
+[`CooperativeScheduler.php`](CooperativeScheduler.php) is the whole driver: a
+class that implements `Async\Scheduler` by extending `Async\AbstractScheduler`,
+so it overrides only the hooks it needs and keeps its state in ordinary
+properties. Register an instance to switch PHP into concurrent mode:
 
 ```php
-Cooperative\spawn(callable $task, mixed ...$args);  // start a coroutine
-Cooperative\suspend();                              // cooperative yield
+Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
 ```
 
-Internally it is four hooks over two queues (closures capturing the queues via
-`use`):
+The hook methods (scheduling *policy*) map an engine event to a queue operation:
 
-| Hook | Policy |
-|------|--------|
-| `INTERCEPT_FIBER` | wrap a starting fiber into a coroutine handle |
-| `ENQUEUE` / `RESUME` | put a runnable coroutine at the tail of the queue |
-| `DEFER` | store a one-shot microtask (used e.g. by a concurrent iterator) |
-| `SUSPEND` | the current flow yields — run the queued coroutines |
+| Hook method | Policy |
+|-------------|--------|
+| `interceptFiber()` | wrap a starting fiber into a coroutine handle |
+| `enqueue()` | put a runnable coroutine at the tail of the queue |
+| `suspend()` | the current flow yields — run the queued coroutines |
+| `defer()` | store a one-shot microtask (used e.g. by a concurrent iterator) |
 
-The context switch itself is never hand-rolled: inside the scheduler it is just
+The context switch itself is never hand-rolled: inside a hook it is just
 `$fiber->start()` / `$fiber->resume()`, which the engine turns into a direct
-switch. `SUSPEND` also receives `bool $isBailout`, so the scheduler can choose
-to complete or drop the pending coroutines when the main flow ends abnormally.
+switch. `suspend()` also receives `bool $isBailout`, so the scheduler can drop
+the pending coroutines when the main flow ends abnormally.
+
+The file also defines the user-facing helpers, kept deliberately apart from the
+scheduler hooks:
+
+```php
+spawn(callable $task, ...$args);  // start a coroutine
+park();                           // cooperative yield: reschedule self, then yield
+await();                          // suspend until Async\Coroutine::resume() wakes us
+```
+
+`park()` is named apart from the `suspend()` hook on purpose: the hook is the
+engine contract, `park()`/`await()` are what application code calls.
+
+### Telling the engine which coroutine is current
+
+There is **no setter**. The scheduler returns a coroutine object from
+`interceptFiber()`, the engine binds it to the fiber, and from then on the
+engine tracks the current coroutine automatically at every switch. Application
+code reads and wakes coroutines through `Async\Coroutine`:
+
+```php
+Async\Coroutine::current(): ?object;                        // the running coroutine, or null in main
+Async\Coroutine::resume(object $coroutine, ?Throwable $e);  // deferred wake — re-queue, never an immediate switch
+```
 
 ## The examples
 
@@ -60,6 +83,25 @@ two fibers. Nothing runs while the main script executes; when it ends, the
 engine hands control to the scheduler (`SUSPEND` with `fromMain = true`) and the
 queued coroutines run to completion — that hand-off is the main flow switching
 into the coroutines.
+
+### `await.php` — awaiting a value across coroutines
+
+[`await.php`](await.php) builds a one-slot `Future`: one coroutine records
+itself with `Async\Coroutine::current()` and suspends; another resolves the
+future and wakes it with `Async\Coroutine::resume()`.
+
+```
+$ php example/await.php
+main: end of script
+consumer: awaiting the value
+producer: resolving the future
+producer: done
+consumer: got 'hello'
+```
+
+The wake is *deferred*: `resume()` re-queues the consumer for the scheduler to
+run, rather than switching into it from the producer's stack — so no
+`FiberError`, unlike a raw `$fiber->resume()` from another fiber.
 
 ### `nested.php` — a coroutine spawns a coroutine
 

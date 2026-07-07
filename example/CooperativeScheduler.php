@@ -80,9 +80,9 @@ final class CooperativeScheduler extends \Async\AbstractScheduler
             // switch directly instead of re-entering the hooks.
             $fiber->isStarted() ? $fiber->resume() : $fiber->start();
 
-            if ($fiber->isSuspended()) {
-                $this->ready->enqueue($coroutine);   // more work: another turn
-            }
+            // A suspended coroutine is NOT auto-rescheduled: it is only queued
+            // again when someone resumes it (park() reschedules itself; an
+            // awaiting coroutine waits for Async\Coroutine::resume()).
         }
 
         return true;
@@ -102,8 +102,15 @@ function spawn(callable $task, mixed ...$args): void
     new Fiber($task)->start(...$args);
 }
 
-/** Cooperative yield: pause the current coroutine, let the scheduler run someone else. */
+/** Cooperative yield: reschedule the current coroutine, then let others run. */
 function park(): void
+{
+    Async\Coroutine::resume(Async\Coroutine::current());
+    Fiber::suspend();
+}
+
+/** Await: suspend until someone calls Async\Coroutine::resume() on us. */
+function await(): void
 {
     Fiber::suspend();
 }
