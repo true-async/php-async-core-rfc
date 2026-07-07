@@ -114,10 +114,25 @@ interface Scheduler
     /** A graceful shutdown has been requested. */
     public function shutdown(): bool;
 
-    /** Coroutine context (key/value bound to a coroutine). */
+    // --- Context: key/value storage bound to a coroutine. Two separate
+    //     stores per coroutine, each fetched by these getters, then operated
+    //     on with the find/set/unset hooks below. ---
+
+    /** The coroutine's userland context (string/object keys). */
+    public function getContext(object $coroutine): object;
+
+    /** The coroutine's internal context (numeric keys, reserved for C extensions). */
+    public function getInternalContext(object $coroutine): object;
+
+    /** Userland context operations (string/object keys). */
     public function contextFind(object $context, mixed $key, bool $includeParent): mixed;
     public function contextSet(object $context, mixed $key, mixed $value): bool;
     public function contextUnset(object $context, mixed $key): bool;
+
+    /** Internal context operations (numeric keys). */
+    public function internalContextFind(object $context, int $key): mixed;
+    public function internalContextSet(object $context, int $key, mixed $value): bool;
+    public function internalContextUnset(object $context, int $key): bool;
 }
 
 /** Convenience base: implement only the hooks you need; the rest default. */
@@ -396,12 +411,6 @@ directly:
 - **Coroutine creation.** The coroutine object is defined and created by the scheduler; the core
   only records the offset it needs to bridge a coroutine to its object. Nothing about coroutine
   construction is registered from PHP.
-- **Context retrieval** (`get_context`, `get_internal_context`). These return the opaque context
-  a coroutine is bound to, creating it lazily. The userland context uses string/object keys; the
-  *internal* context is a separate storage reserved for C extensions, keyed by process-unique
-  numeric keys and never visible to PHP, so extension state can neither collide with userland
-  keys nor leak into scripts. Only the userland lookup/mutation hooks (`CONTEXT_FIND`,
-  `CONTEXT_SET`, `CONTEXT_UNSET`) are registered from PHP.
 - **Wait diagnostics** (`awaiting_info`). Whoever suspends a coroutine may attach a handler that
   returns a human-readable description of what it is waiting for (`"socket #7 (readable)"`), used
   by introspection tooling and deadlock reports. It is a per-coroutine handler, not a scheduler
