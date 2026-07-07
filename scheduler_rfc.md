@@ -25,11 +25,8 @@ A C extension or a PHP library registers a set of hooks through a single call, a
 point on PHP operates concurrently.
 
 ```php
-Async\SchedulerHook::register('my-scheduler', [
-    Async\SchedulerHook::ENQUEUE => enqueue(...),   // a coroutine is ready to run
-    Async\SchedulerHook::SUSPEND => suspend(...),   // the current flow yields: pick the next
-    Async\SchedulerHook::RESUME  => resume(...),    // wake a suspended coroutine
-]);
+// MyScheduler implements Async\Scheduler (or extends Async\AbstractScheduler).
+Async\SchedulerHook::register('my-scheduler', new MyScheduler());
 ```
 
 ## Scope: what this RFC deliberately does not define
@@ -79,41 +76,83 @@ registered scheduler does.
 ### Registration
 
 ```php
-final class Async\SchedulerHook
+namespace Async;
+
+/**
+ * A scheduler implements this interface and hands an instance to
+ * SchedulerHook::register(). Each method is a scheduling *policy* hook; the
+ * engine performs the actual context switches. Extend AbstractScheduler to
+ * override only the hooks you need (enqueue() and suspend() are required).
+ */
+interface Scheduler
 {
-    // Hook-name constants, used as the keys of the $hooks array.
-    public const string LAUNCH          = 'launch';
-    public const string SHUTDOWN        = 'shutdown';
-    public const string INTERCEPT_FIBER = 'intercept_fiber';
-    public const string ENQUEUE         = 'enqueue_coroutine';
-    public const string SUSPEND         = 'suspend';
-    public const string RESUME          = 'resume';
-    public const string CANCEL          = 'cancel';
-    public const string CONTEXT_FIND    = 'context_find';
-    public const string CONTEXT_SET     = 'context_set';
-    public const string CONTEXT_UNSET   = 'context_unset';
-    public const string DEFER           = 'defer';
+    /** A coroutine became runnable (freshly created, or its wait ended). */
+    public function enqueue(object $coroutine): bool;
 
     /**
-     * Registers a scheduler and activates the concurrent mode.
-     *
-     * $hooks maps a hook constant to a callable; omitted hooks retain their
-     * default implementations. A scheduler is registered exactly once per
-     * process: calling this when one is already registered (by a C extension
-     * or by an earlier PHP call) throws an Error.
+     * The current flow yields; pick who runs next and switch to them. Return
+     * the coroutine that is now current (or null) — the engine records it as
+     * Coroutine::current().
      */
-    public static function register(string $module, array $hooks): bool {}
+    public function suspend(bool $fromMain, bool $isBailout): ?object;
+
+    /** A fiber is starting: return a coroutine object to adopt it, or null. */
+    public function interceptFiber(\Fiber $fiber): ?object;
+
+    /** Wake a suspended coroutine (deferred: enqueue it to run later). */
+    public function resume(object $coroutine, ?\Throwable $error = null): bool;
+
+    /** Cancel a coroutine. */
+    public function cancel(object $coroutine, ?\Throwable $error = null): bool;
+
+    /** Store a one-shot microtask on the scheduler's queue. */
+    public function defer(callable $task): bool;
+
+    /** Invoked once when the scheduler starts. */
+    public function launch(): bool;
+
+    /** A graceful shutdown has been requested. */
+    public function shutdown(): bool;
+
+    /** Coroutine context (key/value bound to a coroutine). */
+    public function contextFind(object $context, mixed $key, bool $includeParent): mixed;
+    public function contextSet(object $context, mixed $key, mixed $value): bool;
+    public function contextUnset(object $context, mixed $key): bool;
+}
+
+/** Convenience base: implement only the hooks you need; the rest default. */
+abstract class AbstractScheduler implements Scheduler { /* ... */ }
+
+/** Activation point for the concurrent mode. */
+final class SchedulerHook
+{
+    /**
+     * Registers a scheduler and activates the concurrent mode. Registered
+     * exactly once per process: a second call (by a C extension or by an
+     * earlier PHP call) throws an Error.
+     */
+    public static function register(string $module, Scheduler $scheduler): bool {}
 
     /** The module name of the registered scheduler, or null when none. */
     public static function getModule(): ?string {}
 
     /**
-     * Queues a callable on the scheduler's microtask queue (one-shot,
-     * runs on the next tick). Forwards to the DEFER hook: the queue and
-     * its draining belong to the scheduler.
+     * Queues a callable on the scheduler's microtask queue (one-shot, runs on
+     * the next tick). Forwards to the scheduler's defer() hook.
      */
     public static function defer(callable $task): void {}
+}
 
+/**
+ * The current coroutine, and the way to wake a suspended one. The current
+ * coroutine is whatever the scheduler's suspend() hook last returned — there
+ * is no setter. resume() is a *deferred* wake: it routes the coroutine back to
+ * the scheduler's resume() hook to be re-queued, never an immediate switch.
+ */
+final class Coroutine
+{
+    public static function current(): ?object {}
+    public static function resume(object $coroutine, ?\Throwable $error = null): void {}
 }
 ```
 
@@ -129,6 +168,13 @@ on a fiber bound to a coroutine performs the direct context switch and returns w
 yields; in application code the same calls park the value and hand over to the scheduler through
 the hooks. A complete scheduler loop is therefore: dequeue, `$fiber->resume()`, repeat. Nothing
 switchable is reachable from application code.
+
+The **current coroutine** is not tracked by the engine and has no setter: it is whatever the
+`suspend()` hook returns. Because switching is the scheduler's job — and its implementation need
+not use fibers at all — the scheduler is the only party that knows which coroutine is now running,
+so it reports it through the return value of `suspend()`. `Async\Coroutine::current()` reads that
+value back; `Async\Coroutine::resume()` hands a coroutine to the scheduler's `resume()` hook for a
+deferred wake.
 
 The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the
 scheduler, not by the engine. `defer()` only forwards the callable to the scheduler's DEFER
