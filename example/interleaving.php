@@ -13,15 +13,16 @@
 
 require __DIR__ . '/CooperativeScheduler.php';
 
-use function Cooperative\spawn;
-use function Cooperative\suspend;
+// Activate concurrency by registering a scheduler instance.
+Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
 
 function worker(string $name, int $steps): void
 {
     for ($step = 1; $step <= $steps; $step++) {
         echo "    [$name] step $step of $steps\n";
-        suspend();   // let another coroutine advance
+        park();   // let another coroutine advance
     }
+
     echo "    [$name] finished\n";
 }
 

@@ -1,106 +1,109 @@
 <?php
 
 /**
- * Cooperative fiber scheduler — a self-contained module built on the Async
- * Scheduler Hook API.
+ * Cooperative fiber scheduler — a self-contained scheduler built on the Async
+ * Scheduler Hook API. It implements Async\Scheduler by extending
+ * Async\AbstractScheduler, so only the hooks it needs are overridden; state
+ * lives in ordinary properties (no captured closures).
  *
- * Include the file and it registers the scheduler (switching PHP into
- * concurrent mode); then drive coroutines with Cooperative\spawn() and
- * Cooperative\suspend(). There is no class and no setup call: the hooks are
- * plain closures over two queues.
+ * Register an instance and drive coroutines with spawn() / suspend():
+ *
+ *     Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
  */
+final class CooperativeScheduler extends \Async\AbstractScheduler
+{
+    /** Coroutines ready to (re)run, in round-robin order. */
+    private \SplQueue $ready;
 
-namespace Cooperative;
+    /** One-shot callbacks queued via defer() (microtasks). */
+    private \SplQueue $microtasks;
 
-use Fiber;
-use SplQueue;
-use Throwable;
+    public function __construct()
+    {
+        $this->ready      = new \SplQueue();
+        $this->microtasks = new \SplQueue();
+    }
 
-/** Start a coroutine — the pure-PHP twin of Async\spawn(callable $task, ...$args). */
+    // ------------------------------------------------------------------
+    // Async\Scheduler hooks
+    // ------------------------------------------------------------------
+
+    /** A fiber is starting: adopt it as a coroutine handle. */
+    public function interceptFiber(\Fiber $fiber): ?object
+    {
+        return new class ($fiber) {
+            public function __construct(public readonly \Fiber $fiber) {}
+        };
+    }
+
+    /** A coroutine is ready (created, or its wait finished): queue it. */
+    public function enqueue(object $coroutine): bool
+    {
+        $this->ready->enqueue($coroutine);
+        return true;
+    }
+
+    /** A microtask (used e.g. to drive a concurrent iterator): store it. */
+    public function defer(callable $task): bool
+    {
+        $this->microtasks->enqueue($task);
+        return true;
+    }
+
+    /**
+     * The current flow yields. While the main script runs we only collect
+     * coroutines; the engine hands us control for real when it ends.
+     */
+    public function suspend(bool $fromMain, bool $isBailout): bool
+    {
+        if (!$fromMain) {
+            return true;   // still collecting: run everyone later
+        }
+
+        if ($isBailout) {
+            return true;   // main ended abnormally: abandon the queued coroutines
+        }
+
+        while (!$this->microtasks->isEmpty() || !$this->ready->isEmpty()) {
+            while (!$this->microtasks->isEmpty()) {
+                ($this->microtasks->dequeue())();
+            }
+
+            if ($this->ready->isEmpty()) {
+                break;
+            }
+
+            $coroutine = $this->ready->dequeue();
+            $fiber     = $coroutine->fiber;
+
+            // The real context switch: inside scheduler code start() / resume()
+            // switch directly instead of re-entering the hooks.
+            $fiber->isStarted() ? $fiber->resume() : $fiber->start();
+
+            if ($fiber->isSuspended()) {
+                $this->ready->enqueue($coroutine);   // more work: another turn
+            }
+        }
+
+        return true;
+    }
+}
+
+// ----------------------------------------------------------------------
+// User-facing helpers. Kept deliberately separate from the scheduler's
+// hooks: `suspend()` above is the engine contract; the helpers below are
+// what application code calls. `park()` is named apart from the suspend
+// hook on purpose, to keep the two roles from blurring.
+// ----------------------------------------------------------------------
+
+/** Start a coroutine — the example's twin of Async\spawn(). */
 function spawn(callable $task, mixed ...$args): void
 {
     new Fiber($task)->start(...$args);
 }
 
-/** Cooperative yield — the pure-PHP twin of Async\suspend(). */
-function suspend(): void
+/** Cooperative yield: pause the current coroutine, let the scheduler run someone else. */
+function park(): void
 {
     Fiber::suspend();
 }
-
-/*
- * Register the scheduler. Runs once, when this file is included. Everything it
- * needs is captured by `use`, so nothing leaks into the including script.
- */
-(static function (): void {
-    $ready      = new SplQueue();  // coroutines ready to (re)run
-    $microtasks = new SplQueue();  // one-shot callbacks (Async\SchedulerHook::defer)
-
-    \Async\SchedulerHook::register('cooperative', [
-
-        // A fiber is starting: adopt it as a coroutine handle.
-        \Async\SchedulerHook::INTERCEPT_FIBER =>
-            fn (Fiber $fiber): object => new class ($fiber) {
-                public function __construct(public readonly Fiber $fiber) {}
-            },
-
-        // A coroutine is ready (just created, or its wait finished): queue it.
-        \Async\SchedulerHook::ENQUEUE =>
-            function (object $coroutine) use ($ready): bool {
-                $ready->enqueue($coroutine);
-                return true;
-            },
-        \Async\SchedulerHook::RESUME =>
-            function (object $coroutine, ?Throwable $error) use ($ready): bool {
-                $ready->enqueue($coroutine);
-                return true;
-            },
-
-        // A microtask (used e.g. to drive a concurrent iterator): store it.
-        \Async\SchedulerHook::DEFER =>
-            function (callable $task) use ($microtasks): bool {
-                $microtasks->enqueue($task);
-                return true;
-            },
-
-        // The current flow yields. While the main script runs we only collect
-        // coroutines; the engine hands us control for real when it ends.
-        \Async\SchedulerHook::SUSPEND =>
-            function (bool $fromMain, bool $isBailout) use ($ready, $microtasks): bool {
-
-                if (!$fromMain) {
-                    return true;   // still collecting: run everyone later
-                }
-
-                if ($isBailout) {
-                    // Main ended abnormally (exit(), fatal error). Policy: abandon
-                    // the queued coroutines — we simply never run them.
-                    return true;
-                }
-
-                // Normal end of script: run everyone to completion, fairly.
-                while (!$microtasks->isEmpty() || !$ready->isEmpty()) {
-                    while (!$microtasks->isEmpty()) {
-                        ($microtasks->dequeue())();
-                    }
-
-                    if ($ready->isEmpty()) {
-                        break;
-                    }
-
-                    $coroutine = $ready->dequeue();
-                    $fiber     = $coroutine->fiber;
-
-                    // The real context switch: inside scheduler code start() /
-                    // resume() switch directly instead of re-entering the hooks.
-                    $fiber->isStarted() ? $fiber->resume() : $fiber->start();
-
-                    if ($fiber->isSuspended()) {
-                        $ready->enqueue($coroutine);   // more work: another turn
-                    }
-                }
-
-                return true;
-            },
-    ]);
-})();

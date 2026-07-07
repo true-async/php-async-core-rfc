@@ -14,13 +14,12 @@
 
 require __DIR__ . '/CooperativeScheduler.php';
 
-use function Cooperative\spawn;
-use function Cooperative\suspend;
+Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
 
 function child(string $name): void
 {
     echo "    child $name: step 1\n";
-    suspend();
+    park();
 
     echo "    child $name: step 2\n";
 }
@@ -28,14 +27,14 @@ function child(string $name): void
 function parentTask(): void
 {
     echo "  parent: start\n";
-    suspend();
+    park();
 
     echo "  parent: spawning a child coroutine from inside a coroutine\n";
     spawn(child(...), 'C');
-    suspend();
+    park();
 
     echo "  parent: after the child, another step\n";
-    suspend();
+    park();
 
     echo "  parent: done\n";
 }
