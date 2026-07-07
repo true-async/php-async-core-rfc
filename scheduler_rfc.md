@@ -188,42 +188,45 @@ hook; storage, draining and the exact semantics are the scheduler's policy.
 
 ### Hook specification
 
-Each hook is specified below together with a minimal illustrative implementation. The examples
-sketch a cooperative scheduler whose state is a single run queue (`$queue = new SplQueue()`).
-The hooks implement scheduling *policy*; the actual coroutine switches are performed by the
-engine.
+Each hook is specified below together with a minimal illustrative implementation. The examples are
+methods of a class implementing `Async\Scheduler` whose state is a single run queue
+(`$this->queue`). The hooks implement scheduling *policy*; the actual coroutine switches are
+performed by the engine.
 
-#### `launch(): bool`
+#### `launch(): ?object`
 
 Invoked once when the scheduler starts. For a C-registered scheduler this happens immediately
 before the script code begins executing; for a PHP-registered scheduler it happens at the moment
-of registration, since script code is already running. State initialization belongs here.
+of registration, since script code is already running. State initialization belongs here. Returns
+the coroutine that is now current, or `null` (same contract as `suspend()`).
 
 ```php
-Async\SchedulerHook::LAUNCH => function (): bool {
-    $GLOBALS['queue'] = new SplQueue();
-    return true;
-},
+public function launch(): ?object
+{
+    $this->queue = new SplQueue();
+    return null;
+}
 ```
 
-#### `enqueue_coroutine(object $coroutine): bool`
+#### `enqueue(object $coroutine): bool`
 
 A coroutine has become ready for execution, either newly created or with its wait completed. The
 implementation places it into the run queue. A return value of `false` indicates the coroutine
 was not accepted, for example during shutdown.
 
 ```php
-Async\SchedulerHook::ENQUEUE => function (object $coroutine): bool {
-    $GLOBALS['queue']->enqueue($coroutine);
+public function enqueue(object $coroutine): bool
+{
+    $this->queue->enqueue($coroutine);
     return true;
-},
+}
 ```
 
-#### `suspend(bool $fromMain, bool $isBailout): bool`
+#### `suspend(bool $fromMain, bool $isBailout): ?object`
 
 The central scheduling hook. The currently running flow yields, and the implementation selects
-the next coroutine to execute, typically by dequeuing it and requesting the switch from the
-engine. Two parameters describe the *after-main handover*:
+the next coroutine to execute, switches to it, and **returns the coroutine that is now current**
+(or `null`) — the core records it. Two parameters describe the *after-main handover*:
 
 - `$fromMain = true`: the main script (or its destructors) has finished, so the remaining
   coroutines are to be run to completion rather than performing a single switch.
@@ -231,14 +234,18 @@ engine. Two parameters describe the *after-main handover*:
   implementation decides whether the remaining coroutines are completed or cancelled.
 
 ```php
-Async\SchedulerHook::SUSPEND => function (bool $fromMain, bool $isBailout): bool {
+public function suspend(bool $fromMain, bool $isBailout): ?object
+{
     // Discard remaining work on abnormal termination.
     if ($isBailout) {
-        return false;
+        return null;
     }
 
-    while (!$GLOBALS['queue']->isEmpty()) {
-        $fiber = $GLOBALS['queue']->dequeue()->fiber;
+    $current = null;
+
+    while (!$this->queue->isEmpty()) {
+        $current = $this->queue->dequeue();
+        $fiber   = $current->fiber;
 
         // Inside a hook this is a direct switch; control returns here
         // when the fiber yields. A regular yield needs a single switch;
@@ -246,76 +253,95 @@ Async\SchedulerHook::SUSPEND => function (bool $fromMain, bool $isBailout): bool
         $fiber->isStarted() ? $fiber->resume() : $fiber->start();
 
         if (!$fromMain) {
-            return true;
+            return $current;
         }
     }
 
-    return true;
-},
+    return $current;   // the coroutine we last switched to
+}
 ```
 
-#### `resume(object $coroutine, ?Throwable $error): bool`
+#### `resume(object $coroutine, ?Throwable $error = null): bool`
 
 A request to wake a suspended coroutine. When `$error` is provided, the throwable is thrown at
 the coroutine's suspension point; this is how timeouts and IO failures reach waiting code. A
 typical implementation validates the coroutine's state and returns it to the run queue.
 
 ```php
-Async\SchedulerHook::RESUME => function (object $coroutine, ?Throwable $error): bool {
+public function resume(object $coroutine, ?Throwable $error = null): bool
+{
     $coroutine->pendingError = $error;
-    $GLOBALS['queue']->enqueue($coroutine);
+    $this->queue->enqueue($coroutine);
     return true;
-},
+}
 ```
 
-#### `cancel(object $coroutine, ?Throwable $error): bool`
+#### `cancel(object $coroutine, ?Throwable $error = null): bool`
 
 A request to cancel a coroutine. Unlike `resume` with an error, cancellation is a *state*: the
 coroutine is marked cancelled, and the mark remains observable after completion.
 
 ```php
-Async\SchedulerHook::CANCEL => function (object $coroutine, ?Throwable $error): bool {
+public function cancel(object $coroutine, ?Throwable $error = null): bool
+{
     $coroutine->cancelled = true;
     return $this->resume($coroutine, $error ?? new CancellationError('cancelled'));
-},
+}
 ```
 
-#### `context_find(object $context, mixed $key): mixed`
+#### `getContext(object $coroutine): object` / `getInternalContext(object $coroutine): object`
 
-Each coroutine is associated with an *execution-flow context*: key/value storage that follows the
-logical chain of execution (request identifier, tracing span, locale). `context_find` performs a
-key lookup in the given context. Whether the lookup consults parent contexts is the scheduler's
-policy. Keys are strings or objects (compared by identity). The context object itself is produced
-by the scheduler (see *Responsibilities not registered from PHP* below).
+Each coroutine is associated with two *execution-flow contexts*: key/value storage that follows
+the logical chain of execution. The **userland** context uses string/object keys (request id,
+tracing span, locale); the **internal** context is a separate store reserved for C extensions,
+keyed by process-unique numeric keys. These getters return the context object a coroutine is bound
+to, which is then operated on with the find/set/unset hooks below.
 
 ```php
-Async\SchedulerHook::CONTEXT_FIND => function (object $ctx, mixed $key): mixed {
-    for (; $ctx !== null; $ctx = $ctx->parent) {
+public function getContext(object $coroutine): object
+{
+    return $coroutine->context ??= new Context();
+}
+```
+
+#### `contextFind(object $context, mixed $key, bool $includeParent): mixed`
+
+Performs a key lookup in the given userland context. When `$includeParent` is true the lookup
+continues along the inheritance chain. Keys are strings or objects (compared by identity).
+
+```php
+public function contextFind(object $context, mixed $key, bool $includeParent): mixed
+{
+    for ($ctx = $context; $ctx !== null; $ctx = $includeParent ? $ctx->parent : null) {
         if ($ctx->values->offsetExists($key)) {
             return $ctx->values[$key];
         }
     }
     return null;
-},
+}
 ```
 
-#### `context_set(object $context, mixed $key, mixed $value): bool` / `context_unset(object $context, mixed $key): bool`
+#### `contextSet(object $context, mixed $key, mixed $value): bool` / `contextUnset(object $context, mixed $key): bool`
 
 Stores or removes a value in the given context. Both operations are strictly local: a child
-context cannot modify its parent.
+context cannot modify its parent. The `internalContext*` methods are the same, but keyed by the
+numeric keys of the internal context.
 
 ```php
-Async\SchedulerHook::CONTEXT_SET => function (object $ctx, mixed $key, mixed $value): bool {
-    $ctx->values[$key] = $value;
+public function contextSet(object $context, mixed $key, mixed $value): bool
+{
+    $context->values[$key] = $value;
     return true;
-},
-Async\SchedulerHook::CONTEXT_UNSET => function (object $ctx, mixed $key): bool {
-    unset($ctx->values[$key]);
+}
+
+public function contextUnset(object $context, mixed $key): bool
+{
+    unset($context->values[$key]);
     return true;
-},
+}
 ```
 
-#### `intercept_fiber(object $fiber): ?object`
+#### `interceptFiber(\Fiber $fiber): ?object`
 
 The point where the engine links a fiber to a coroutine. There are two kinds of fibers:
 *low-level* ones, pure context switching that Revolt-style loops drive themselves (no coroutine
@@ -358,9 +384,11 @@ final class Scheduler
     }
 }
 
-// Registered hook: mine stay low-level, everything else gets a coroutine.
-Async\SchedulerHook::INTERCEPT_FIBER => fn (\Fiber $fiber): ?object
-    => $this->internalFibers->contains($fiber) ? null : new MyCoroutine($fiber),
+    // Mine stay low-level, everything else gets a coroutine.
+    public function interceptFiber(\Fiber $fiber): ?object
+    {
+        return $this->internalFibers->contains($fiber) ? null : new MyCoroutine($fiber);
+    }
 ```
 
 The precedence follows from this. With no scheduler, fibers stay low-level. With a scheduler but
@@ -384,10 +412,11 @@ tick. The engine never stores tasks itself: both `SchedulerHook::defer()` and C-
 route through this hook, and the queue lives entirely in the scheduler.
 
 ```php
-Async\SchedulerHook::DEFER => function (callable $task) use ($tasks): bool {
-    $tasks->enqueue($task);
+public function defer(callable $task): bool
+{
+    $this->tasks->enqueue($task);
     return true;
-},
+}
 ```
 
 #### `shutdown(): bool`
@@ -396,12 +425,13 @@ A graceful shutdown has been requested. The implementation stops accepting new w
 determines the fate of the remaining coroutines.
 
 ```php
-Async\SchedulerHook::SHUTDOWN => function (): bool {
-    while (!$GLOBALS['queue']->isEmpty()) {
-        $this->cancel($GLOBALS['queue']->dequeue(), null);
+public function shutdown(): bool
+{
+    while (!$this->queue->isEmpty()) {
+        $this->cancel($this->queue->dequeue());
     }
     return true;
-},
+}
 ```
 
 ### Responsibilities not registered from PHP
