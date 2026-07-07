@@ -131,11 +131,6 @@ interface Scheduler
     public function contextFind(object $context, mixed $key, bool $includeParent): mixed;
     public function contextSet(object $context, mixed $key, mixed $value): bool;
     public function contextUnset(object $context, mixed $key): bool;
-
-    /** Internal context operations (numeric keys). */
-    public function internalContextFind(object $context, int $key): mixed;
-    public function internalContextSet(object $context, int $key, mixed $value): bool;
-    public function internalContextUnset(object $context, int $key): bool;
 }
 
 /** Convenience base: implement only the hooks you need; the rest default. */
@@ -324,8 +319,8 @@ public function contextFind(object $context, mixed $key, bool $includeParent): m
 #### `contextSet(object $context, mixed $key, mixed $value): bool` / `contextUnset(object $context, mixed $key): bool`
 
 Stores or removes a value in the given context. Both operations are strictly local: a child
-context cannot modify its parent. The `internalContext*` methods are the same, but keyed by the
-numeric keys of the internal context.
+context cannot modify its parent. The internal context (from `getInternalContext()`) is operated
+on by C extensions directly, not through PHP hooks.
 
 ```php
 public function contextSet(object $context, mixed $key, mixed $value): bool
