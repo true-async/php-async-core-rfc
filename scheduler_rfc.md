@@ -25,7 +25,7 @@ A C extension or a PHP library registers a set of hooks through a single call, a
 point on PHP operates concurrently.
 
 ```php
-// MyScheduler implements Async\Scheduler (or extends Async\AbstractScheduler).
+// MyScheduler implements Async\Scheduler.
 Async\SchedulerHook::register('my-scheduler', new MyScheduler());
 ```
 
@@ -97,8 +97,7 @@ final class Continuation { /* opaque */ }
 /**
  * A scheduler implements this interface and hands an instance to
  * SchedulerHook::register(). The `on*` methods are *event callbacks* the engine
- * invokes; the engine performs the actual context switches. Extend
- * AbstractScheduler to override only the hooks you need.
+ * invokes; the engine performs the actual context switches.
  */
 interface Scheduler
 {
@@ -156,9 +155,6 @@ interface Scheduler
     public function contextUnset(object $context, mixed $key): bool;
 }
 
-/** Convenience base: implement only the hooks you need; the rest default. */
-abstract class AbstractScheduler implements Scheduler { /* ... */ }
-
 /** Activation point for the concurrent mode. */
 final class SchedulerHook
 {
@@ -210,9 +206,8 @@ hook; storage, draining and the exact semantics are the scheduler's policy.
 registered a `[hook => callable]` map. An interface is better on every axis: the
 implementation is a real object, so the hooks share state through `$this` instead
 of a web of `use`-captured variables; the contract is *typed* and checked at
-compile time (a wrong signature is an error, not a run-time surprise); `AbstractScheduler`
-supplies defaults so a scheduler overrides only what it needs; and the hook set
-evolves by adding interface methods, versioned together with the module API. It
+compile time (a wrong signature is an error, not a run-time surprise); and the hook
+set evolves by adding interface methods, versioned together with the module API. It
 also reads the way engine integration points already look (`SessionHandlerInterface`,
 `Countable`, …).
 
