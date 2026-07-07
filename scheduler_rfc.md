@@ -108,8 +108,11 @@ interface Scheduler
     /** Store a one-shot microtask on the scheduler's queue. */
     public function defer(callable $task): bool;
 
-    /** Invoked once when the scheduler starts. */
-    public function launch(): bool;
+    /**
+     * Invoked once when the scheduler starts. Return the coroutine that is now
+     * current (or null) — the core records it, same as suspend().
+     */
+    public function launch(): ?object;
 
     /** A graceful shutdown has been requested. */
     public function shutdown(): bool;
