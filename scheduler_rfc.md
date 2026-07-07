@@ -91,8 +91,8 @@ interface Scheduler
 
     /**
      * The current flow yields; pick who runs next and switch to them. Return
-     * the coroutine that is now current (or null) — the engine records it as
-     * Coroutine::current().
+     * the coroutine that is now current (or null) — the core records it as the
+     * current coroutine.
      */
     public function suspend(bool $fromMain, bool $isBailout): ?object;
 
@@ -142,18 +142,6 @@ final class SchedulerHook
      */
     public static function defer(callable $task): void {}
 }
-
-/**
- * The current coroutine, and the way to wake a suspended one. The current
- * coroutine is whatever the scheduler's suspend() hook last returned — there
- * is no setter. resume() is a *deferred* wake: it routes the coroutine back to
- * the scheduler's resume() hook to be re-queued, never an immediate switch.
- */
-final class Coroutine
-{
-    public static function current(): ?object {}
-    public static function resume(object $coroutine, ?\Throwable $error = null): void {}
-}
 ```
 
 The hook set is not versioned separately: it evolves together with the standard PHP module API
@@ -169,12 +157,12 @@ yields; in application code the same calls park the value and hand over to the s
 the hooks. A complete scheduler loop is therefore: dequeue, `$fiber->resume()`, repeat. Nothing
 switchable is reachable from application code.
 
-The **current coroutine** is not tracked by the engine and has no setter: it is whatever the
-`suspend()` hook returns. Because switching is the scheduler's job — and its implementation need
-not use fibers at all — the scheduler is the only party that knows which coroutine is now running,
-so it reports it through the return value of `suspend()`. `Async\Coroutine::current()` reads that
-value back; `Async\Coroutine::resume()` hands a coroutine to the scheduler's `resume()` hook for a
-deferred wake.
+The **current coroutine** has no setter: it is whatever the `suspend()` hook returns. Because
+switching is the scheduler's job — and its implementation need not use fibers at all — the
+scheduler is the only party that knows which coroutine is now running, so it reports it through
+the return value of `suspend()`, and the core records it as the current coroutine. How that value
+is exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`) is **not
+part of this RFC** — like the coroutine object itself, it belongs to the scheduler's API.
 
 The same split applies to **microtasks**: the queue of one-shot callbacks is owned by the
 scheduler, not by the engine. `defer()` only forwards the callable to the scheduler's DEFER
