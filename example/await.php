@@ -30,7 +30,7 @@ final class Future
     public function await(): mixed
     {
         if (!$this->ready) {
-            $this->waiter = Async\Coroutine::current();
+            $this->waiter = currentCoroutine();   // the scheduler's self-lookup
             await();   // suspend until resolve() wakes us
         }
 
