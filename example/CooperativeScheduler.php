@@ -54,15 +54,17 @@ final class CooperativeScheduler extends \Async\AbstractScheduler
      * The current flow yields. While the main script runs we only collect
      * coroutines; the engine hands us control for real when it ends.
      */
-    public function suspend(bool $fromMain, bool $isBailout): bool
+    public function suspend(bool $fromMain, bool $isBailout): ?object
     {
         if (!$fromMain) {
-            return true;   // still collecting: run everyone later
+            return null;   // still collecting: run everyone later
         }
 
         if ($isBailout) {
-            return true;   // main ended abnormally: abandon the queued coroutines
+            return null;   // main ended abnormally: abandon the queued coroutines
         }
+
+        $current = null;
 
         while (!$this->microtasks->isEmpty() || !$this->ready->isEmpty()) {
             while (!$this->microtasks->isEmpty()) {
@@ -73,21 +75,21 @@ final class CooperativeScheduler extends \Async\AbstractScheduler
                 break;
             }
 
-            $coroutine = $this->ready->dequeue();
-            $fiber     = $coroutine->fiber;
+            $current = $this->ready->dequeue();
+            $fiber   = $current->fiber;
 
-            // Tell the engine which coroutine is now current, then switch into
-            // it. Inside scheduler code start()/resume() switch directly.
-            \Async\Coroutine::setCurrent($coroutine);
+            // Switch into the coroutine (inside scheduler code start()/resume()
+            // switch directly). We hand the coroutine back to the engine below,
+            // as the suspend hook's return value.
             $fiber->isStarted() ? $fiber->resume() : $fiber->start();
-            \Async\Coroutine::setCurrent(null);   // back in the pump: no coroutine is current
 
             // A suspended coroutine is NOT auto-rescheduled: it is only queued
             // again when someone resumes it (park() reschedules itself; an
             // awaiting coroutine waits for Async\Coroutine::resume()).
         }
 
-        return true;
+        // The engine records the returned coroutine as Async\Coroutine::current().
+        return $current;
     }
 }
 
