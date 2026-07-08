@@ -56,10 +56,15 @@ presented to the user*.
    production use.
 3. **Strict opt-in.** With no scheduler registered, PHP behaves exactly as it does today, at
    negligible cost.
-4. **Better integration for fiber-based libraries.** Because coroutines are represented natively
-   and a scheduler can adopt fibers onto the coroutine path (see the `intercept_fiber` hook),
-   existing fiber-based libraries such as ReactPHP/Revolt and AMPHP gain a defined way to
-   cooperate with the engine instead of each driving concurrency in isolation.
+4. **Fibers adapted to the coroutine context, backward-compatibly.** Existing `Fiber`-based code
+   keeps running unchanged. When a scheduler is active, the `onFiber` hook lets it adapt each
+   starting fiber to the coroutine context, adopting it onto the schedule. Fiber-based libraries
+   such as ReactPHP/Revolt and AMPHP thus cooperate with the engine instead of each driving
+   concurrency in isolation, while the existing behaviour of a plain fiber is preserved.
+5. **Free switching between execution contexts.** The engine exposes a low-level symmetric-switch
+   primitive, `Continuation`: a scheduler can transfer control directly from one coroutine into
+   another (`$coroutine->switchTo()`) instead of routing every hand-off through a central loop.
+   This gives schedulers a symmetric coroutine model, built on the engine's own fiber machinery.
 
 ## Proposal
 
