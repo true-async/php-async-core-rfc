@@ -443,7 +443,8 @@ in production, what becomes possible once PHP can switch into a concurrent mode.
 - **The server as a first-class citizen.** A long-lived, coroutine-driven server is the natural
   host: gRPC, WebSocket, HTTP/3, HTTP/2 and SSE map cleanly onto coroutines (one coroutine per
   stream/connection), and a stateful runtime reuses connection pools and initialised services
-  across requests instead of rebuilding them per request.
+  across requests instead of rebuilding them per request. In synthetic benchmarks the C server
+  matches C/Rust implementations, and on real workloads it shows a substantial practical gain.
 
 - **Integrations.** The same model absorbs inherently concurrent external systems — Temporal
   (workflow orchestration), ClickHouse, and other network services — as ordinary coroutine code.
