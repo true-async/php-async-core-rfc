@@ -34,10 +34,11 @@ Async\SchedulerHook::register('my-scheduler', new MyScheduler());
 
 ## Scope: what this RFC deliberately does not define
 
-This document specifies the *activation contract* and nothing beyond it. **Extensions and
-third-party code remain free to define arbitrary functions, classes and APIs on top of the
-registered scheduler** (`spawn()`, `await()`, channels, futures, an `Async\` namespace), **and
-this RFC intentionally defines none of them.** The class of the coroutine object, the transfer
+This document defines only the *hook layer*: the set of hooks through which a scheduler extends
+the behaviour of the PHP core, without baking any concrete Scheduler implementation into the
+engine. **Extensions and third-party code remain free to define arbitrary functions, classes and
+APIs on top of the registered scheduler** (`spawn()`, `await()`, channels, futures, an `Async\`
+namespace), **and this RFC intentionally defines none of them.** The class of the coroutine object, the transfer
 of values between coroutines, and the shape of the user-facing API are the exclusive domain of
 the scheduler implementation. The [True Async RFC](https://wiki.php.net/rfc/true_async) is one
 such API, built on this core.
