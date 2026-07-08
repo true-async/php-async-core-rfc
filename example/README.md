@@ -19,10 +19,16 @@ direct coroutine-to-coroutine jump. **Runs on today's engine.**
 
 ## [`continuation/`](continuation/) — Continuation (symmetric)
 
-The same scheduler via the *additional* `Continuation` API: coroutines are
-`Continuation`s (minted by the scheduler through the `createContinuation` mandate
-handed to `onLaunch`), and the scheduler switches **directly** into one with
-`$coroutine->switchTo()`: one switch, no intermediary. **Runs on today's engine.**
+The same scheduler via the *additional* `Continuation` API, in the RFC's two
+layers: a `Continuation` (minted through the `createContinuation` mandate handed
+to `onLaunch`) is the switch primitive, and the scheduler wraps it into its own
+`Coroutine` class, the schedulable unit the ready queue holds. The scheduler
+switches **directly** into one with `$coroutine->continuation->switchTo()`: one
+switch, no intermediary. The main flow is normalised the same way: at its first
+yield it is captured via the `currentContinuation` mandate and becomes a
+`Coroutine` too (`isMain`), which `onSuspend()` returns as the current one.
+**Targets the RFC mandate with three closures** (the PoC bridge currently hands
+two: `currentContinuation` is pending there).
 
 - [`scheduler.php`](continuation/scheduler.php)
 

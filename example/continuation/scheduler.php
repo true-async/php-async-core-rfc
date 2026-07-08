@@ -1,64 +1,120 @@
 <?php
 
 /**
- * VARIANT B — cooperative scheduler on Continuations (symmetric).
+ * VARIANT B: cooperative scheduler on Continuations (symmetric).
  *
- * Coroutines ARE Continuations (minted by the scheduler through the
- * createContinuation mandate, no Fiber). The scheduler switches directly into a
- * coroutine with $coroutine->switchTo(): a symmetric jump, no central hub.
+ * Two layers, as in the RFC. A Continuation is the low-level switch primitive;
+ * a Coroutine is the schedulable unit the scheduler builds on top of it. The
+ * scheduler mints a Continuation through the createContinuation mandate and
+ * wraps it into its own Coroutine object: the ready queue holds Coroutines,
+ * never raw Continuations. Switching goes directly into the Continuation with
+ * $coroutine->continuation->switchTo(): a symmetric jump, no central hub.
  *
- * The mandate (createContinuation + currentCoroutine) arrives only in onLaunch(),
- * so nobody but the scheduler can mint coroutines. Switching is a method on the
- * Continuation the scheduler holds.
+ * The system normalises itself: the main flow is started by the engine, not
+ * the scheduler, so at its first yield onSuspend() captures the running
+ * context via currentContinuation and wraps it into a Coroutine too (isMain).
+ * onSuspend() returns it, so the engine records the main coroutine as
+ * current, not null.
  *
- * Runs on the engine's Async\Continuation.
+ * The mandate (createContinuation + currentContinuation + currentCoroutine)
+ * arrives only in onLaunch(), so nobody but the scheduler can mint or capture
+ * continuations.
  */
+
+/** The scheduler's own coroutine: wraps the Continuation that backs it. */
+final class Coroutine
+{
+    public Context $context;
+    public Context $internalContext;
+
+    public function __construct(
+        public readonly \Async\Continuation $continuation,
+        public readonly bool $isMain = false,
+    ) {
+        $this->context = new Context();
+        $this->internalContext = new Context();
+    }
+}
+
+/** A per-coroutine key/value store: string keys, or object keys by identity. */
+final class Context
+{
+    public array $byString = [];
+    public \SplObjectStorage $byObject;
+
+    public function __construct()
+    {
+        $this->byObject = new \SplObjectStorage();
+    }
+}
 
 final class ContinuationScheduler implements \Async\Scheduler
 {
     public static ContinuationScheduler $instance;
-    private \SplQueue $ready;
 
-    /** The mandate — held only by the scheduler. */
+    private \SplQueue $ready;              // Coroutine objects, never raw Continuations
+    private \SplQueue $microtasks;         // onDefer() queue, drained once per tick
+    private ?Coroutine $main = null;       // the adopted main flow
+
+    /** The mandate: held only by the scheduler. */
     private \Closure $createContinuation;  // createContinuation(callable $entry): Continuation
+    private \Closure $currentContinuation; // currentContinuation(): Continuation
     private \Closure $currentCoroutine;    // currentCoroutine(): ?object
 
     public function __construct()
     {
         self::$instance = $this;
-        $this->ready    = new \SplQueue();
+        $this->ready = new \SplQueue();
+        $this->microtasks = new \SplQueue();
     }
 
     /** The engine hands the mandate once, at start. */
-    public function onLaunch(\Closure $createContinuation, \Closure $currentCoroutine): ?object
-    {
+    public function onLaunch(
+        \Closure $createContinuation,
+        \Closure $currentContinuation,
+        \Closure $currentCoroutine,
+    ): ?object {
         $this->createContinuation = $createContinuation;
-        $this->currentCoroutine   = $currentCoroutine;
+        $this->currentContinuation = $currentContinuation;
+        $this->currentCoroutine = $currentCoroutine;
         return null;
     }
 
-    /** Spawn: the scheduler mints its OWN coroutine as a Continuation. */
-    public function spawn(callable $task): void
+    /** Spawn: mint a Continuation and wrap it into the scheduler's Coroutine. */
+    public function spawn(callable $task): Coroutine
     {
-        $this->ready->enqueue(($this->createContinuation)($task));
+        $coroutine = new Coroutine(($this->createContinuation)($task));
+        $this->ready->enqueue($coroutine);
+        return $coroutine;
     }
 
     /**
-     * End of main: the engine hands us control (onSuspend with $fromMain). We
-     * switch into each ready coroutine in turn with switchTo() — a direct
-     * symmetric jump into the Continuation, no intermediary.
+     * The yielding flow hands us control. Normalise it first: on its first
+     * yield the main flow has no Coroutine yet, so capture its Continuation
+     * and wrap it. Then run one tick of microtasks and switch into each ready
+     * coroutine in turn: a direct symmetric jump, no intermediary.
      */
     public function onSuspend(bool $fromMain, bool $isBailout): ?object
     {
-        if (!$fromMain || $isBailout) {
-            return null;
+        $self = ($this->currentCoroutine)();
+
+        if ($self === null) {
+            $self = $this->main = new Coroutine(($this->currentContinuation)(), isMain: true);
         }
 
-        while (!$this->ready->isEmpty()) {
-            $this->ready->dequeue()->switchTo();
+        if (!$isBailout) {
+            while (!$this->ready->isEmpty() || !$this->microtasks->isEmpty()) {
+                while (!$this->microtasks->isEmpty()) {
+                    ($this->microtasks->dequeue())();       // one-shot, this tick
+                }
+
+                if (!$this->ready->isEmpty()) {
+                    $this->ready->dequeue()->continuation->switchTo();
+                }
+            }
         }
 
-        return null;
+        return $self;   // recorded as current: the main coroutine at end of main
     }
 
     public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool
@@ -67,7 +123,7 @@ final class ContinuationScheduler implements \Async\Scheduler
         return true;
     }
 
-    // This scheduler runs only its own Continuations, so it adopts no foreign
+    // This scheduler runs only its own coroutines, so it adopts no foreign
     // fibers (a Revolt/AMPHP-hosting scheduler would return a coroutine here).
     public function onFiber(\Fiber $fiber): ?object
     {
@@ -75,23 +131,67 @@ final class ContinuationScheduler implements \Async\Scheduler
     }
 
     public function onShutdown(): bool { return true; }
-    public function onDefer(callable $task): bool { return false; }
 
-    public function getContext(object $coroutine): object { return new \stdClass(); }
-    public function getInternalContext(object $coroutine): object { return new \stdClass(); }
-    public function contextFind(object $context, mixed $key): mixed { return null; }
-    public function contextSet(object $context, mixed $key, mixed $value): bool { return false; }
-    public function contextUnset(object $context, mixed $key): bool { return false; }
+    /** Microtasks: the engine stores nothing, the queue lives here. */
+    public function onDefer(callable $task): bool
+    {
+        $this->microtasks->enqueue($task);
+        return true;
+    }
+
+    public function onWaitInfo(object $coroutine, string $info): bool
+    {
+        return true;    // this demo does not track wait descriptions
+    }
+
+    public function getContext(object $coroutine): object
+    {
+        return $coroutine->context;
+    }
+
+    public function getInternalContext(object $coroutine): object
+    {
+        return $coroutine->internalContext;
+    }
+
+    public function contextFind(object $context, mixed $key): mixed
+    {
+        return is_object($key)
+            ? ($context->byObject[$key] ?? null)
+            : ($context->byString[$key] ?? null);
+    }
+
+    public function contextSet(object $context, mixed $key, mixed $value): bool
+    {
+        if (is_object($key)) {
+            $context->byObject[$key] = $value;
+        } else {
+            $context->byString[$key] = $value;
+        }
+
+        return true;
+    }
+
+    public function contextUnset(object $context, mixed $key): bool
+    {
+        if (is_object($key)) {
+            unset($context->byObject[$key]);
+        } else {
+            unset($context->byString[$key]);
+        }
+
+        return true;
+    }
 }
 
-// --- user-facing helper ----------------------------------------------------
+// --- user-facing helpers -----------------------------------------------------
 
-function spawn(callable $task): void
+function spawn(callable $task): Coroutine
 {
-    ContinuationScheduler::$instance->spawn($task);
+    return ContinuationScheduler::$instance->spawn($task);
 }
 
-// --- demo ------------------------------------------------------------------
+// --- demo ----------------------------------------------------------------------
 
 \Async\SchedulerHook::register('continuation', new ContinuationScheduler());
 
@@ -102,7 +202,14 @@ function worker(string $name, int $steps): void
     }
 }
 
-echo "main: spawn A, B (continuations)\n";
-spawn(fn () => worker('A', 3));
-spawn(fn () => worker('B', 2));
-echo "main: end — scheduler switches directly into each continuation\n";
+echo "main: spawn A, B (coroutines wrapping continuations)\n";
+$a = spawn(fn () => worker('A', 3));
+$b = spawn(fn () => worker('B', 2));
+
+// A context value attached to a coroutine before it runs.
+ContinuationScheduler::$instance->contextSet($a->context, 'request-id', 'r-42');
+
+// A microtask: one-shot, runs on the scheduler's next tick, before the switches.
+\Async\SchedulerHook::defer(fn () => print "    [defer] microtask runs first\n");
+
+echo "main: end: one tick of microtasks, then a direct switch into each coroutine\n";

@@ -107,10 +107,11 @@ namespace Async;
 
 /**
  * The low-level symmetric-switch primitive: a bare execution context. Minted via
- * the createContinuation capability; it is *not* the schedulable unit: a scheduler
- * wraps a Continuation into its own coroutine object. Switching is done on the
- * Continuation itself. Internally backed by the engine's Fiber machinery, so it
- * stays compatible with fiber-aware tooling (e.g. Xdebug).
+ * the createContinuation capability, or captured from the running flow via
+ * currentContinuation (how the main flow is adopted). It is *not* the schedulable
+ * unit: a scheduler wraps a Continuation into its own coroutine object. Switching
+ * is done on the Continuation itself. Internally backed by the engine's Fiber
+ * machinery, so it stays compatible with fiber-aware tooling (e.g. Xdebug).
  */
 final class Continuation
 {
@@ -141,15 +142,16 @@ interface Scheduler
      * The scheduler starts. The engine hands a PHP scheduler its privileged
      * capabilities as plain closures (a C scheduler reaches the primitives
      * directly and receives none). Because they arrive only here, only the
-     * scheduler holds them: no other code can mint continuations or read the
-     * current coroutine. Switching is not one of these closures: it is done either
-     * through the plain Fiber interface (for an adopted fiber) or on the
-     * Continuation itself (for the scheduler's own coroutines). Returns the
+     * scheduler holds them: no other code can mint or capture continuations, or
+     * read the current coroutine. Switching is not one of these closures: it is
+     * done either through the plain Fiber interface (for an adopted fiber) or on
+     * the Continuation itself (for the scheduler's own coroutines). Returns the
      * coroutine now current (or null); the engine records it, same as onSuspend().
      */
     public function onLaunch(
-        \Closure $createContinuation,  // createContinuation(callable $entry): Continuation
-        \Closure $currentCoroutine,    // currentCoroutine(): ?object
+        \Closure $createContinuation,   // createContinuation(callable $entry): Continuation
+        \Closure $currentContinuation,  // currentContinuation(): Continuation
+        \Closure $currentCoroutine,     // currentCoroutine(): ?object
     ): ?object;
 
     /** A graceful shutdown has been requested. */
@@ -233,9 +235,9 @@ final class SchedulerHook
   optional companion interfaces (the way session handlers gained
   `SessionUpdateTimestampHandlerInterface`) without breaking implementations.
 
-- **Privileged operations as hidden closures.** `createContinuation` and `currentCoroutine`
-  are handed to `onLaunch()` once, only to the scheduler: a capability, not a global
-  function or static method that any code could call.
+- **Privileged operations as hidden closures.** `createContinuation`, `currentContinuation`
+  and `currentCoroutine` are handed to `onLaunch()` once, only to the scheduler: a
+  capability, not a global function or static method that any code could call.
 
 - **Continuation vs Fiber.** A `Fiber` is asymmetric (yields only to its resumer),
   so A → B costs two switches through an intermediary. A `Continuation` is
@@ -301,8 +303,8 @@ pseudocode:
 // Pseudocode: the scheduler's onSuspend, blocking in the reactor when idle.
 public function onSuspend(bool $fromMain, bool $isBailout): ?object
 {
-    $current = null;
-
+    $self = $this->normaliseCaller();      // the yielding flow, main included
+                                           // (see "The main flow is a coroutine too")
     while ($this->hasLiveCoroutines()) {
         if ($this->ready->isEmpty()) {
             Poll::run(block: true);        // sleep in the kernel until an fd/timer fires;
@@ -311,13 +313,30 @@ public function onSuspend(bool $fromMain, bool $isBailout): ?object
         $current->switchTo();              // (or drive its adopted fiber)
     }
 
-    return $current;
+    return $self;                          // this frame resumes when $self runs again
 }
 ```
 
 Coroutines run until they all park on I/O; the queue empties; the scheduler blocks in the reactor;
 an OS event fires a callback; the callback re-queues a coroutine; the reactor returns and the
 scheduler switches into it. No coroutine is lost and the thread never busy-waits.
+
+### The main flow is a coroutine too
+
+One flow exists before the scheduler ever runs: the top-level script itself. The engine starts
+it, not the scheduler, so at first it is the only schedulable flow without a coroutine object.
+The system normalises itself at the first yield: `onSuspend()` captures the currently running
+context with the `currentContinuation` capability, wraps it into the scheduler's own coroutine
+object, and marks it *main* (the attribute from the Coroutines section). From that point the
+top-level script is suspended, enqueued and resumed like any other coroutine; nothing in the
+scheduler treats it specially afterwards.
+
+This normalisation also pins down the return value of `onSuspend()` precisely. The call returns
+when something switches back into the yielding flow, and the flow running at that moment is
+exactly the one the hook normalised: so the scheduler returns that coroutine object, and the
+engine records it as current. In particular, the end-of-main handover returns the *main*
+coroutine, not null. This is how the reference implementation behaves: TrueAsync represents the
+main flow as a coroutine and reports it from the end-of-main handover.
 
 ### A minimal scheduler
 
@@ -333,11 +352,16 @@ final class MyCoroutine
 {
     public ?Async\Continuation $continuation = null;
     public ?\Throwable $pendingError = null;
+    public bool $isMain = false;
     public object $context;
     public object $internal;
 
-    public function __construct(public readonly \Closure|\Fiber $body)
+    public function __construct(public readonly \Closure|\Fiber|Async\Continuation $body)
     {
+        if ($body instanceof Async\Continuation) {
+            $this->continuation = $body;   // an already-running flow, adopted as is
+        }
+
         $this->context = new \stdClass();
         $this->internal = new \stdClass();
     }
@@ -345,17 +369,24 @@ final class MyCoroutine
 
 final class MiniScheduler implements Async\Scheduler
 {
-    private \SplQueue $ready;              // runnable coroutines
-    private \SplQueue $microtasks;         // onDefer() queue, drained once per tick
-    private \SplObjectStorage $waitInfo;   // coroutine => what it is waiting for
-    private \Closure $createContinuation;  // capability received at onLaunch()
-    private \Closure $currentCoroutine;    // capability received at onLaunch()
+    private \SplQueue $ready;               // runnable coroutines
+    private \SplQueue $microtasks;          // onDefer() queue, drained once per tick
+    private \SplObjectStorage $waitInfo;    // coroutine => what it is waiting for
+    private ?MyCoroutine $main = null;      // the adopted main flow
+    private \Closure $createContinuation;   // capability received at onLaunch()
+    private \Closure $currentContinuation;  // capability received at onLaunch()
+    private \Closure $currentCoroutine;     // capability received at onLaunch()
 
-    public function onLaunch(\Closure $createContinuation, \Closure $currentCoroutine): ?object
-    {
+    public function onLaunch(
+        \Closure $createContinuation,
+        \Closure $currentContinuation,
+        \Closure $currentCoroutine,
+    ): ?object {
         // The capabilities arrive exactly once: from here on, only the
-        // scheduler can mint continuations or read the current coroutine.
+        // scheduler can mint or capture continuations, or read the current
+        // coroutine.
         $this->createContinuation = $createContinuation;
+        $this->currentContinuation = $currentContinuation;
         $this->currentCoroutine = $currentCoroutine;
         $this->ready = new \SplQueue();
         $this->microtasks = new \SplQueue();
@@ -381,22 +412,32 @@ final class MiniScheduler implements Async\Scheduler
 
     public function onSuspend(bool $fromMain, bool $isBailout): ?object
     {
-        // The reactor variant of this loop (blocking on I/O when idle) is shown
-        // in the previous section. $fromMain marks the end-of-main drain;
+        // Normalise the yielding flow first: on its first yield the main flow
+        // has no coroutine object yet, so capture and adopt it (see "The main
+        // flow is a coroutine too"). $fromMain marks the end-of-main drain;
         // $isBailout, the last chance to release resources.
-        $current = null;
+        $self = ($this->currentCoroutine)();
 
-        while (!$this->ready->isEmpty()) {
+        if ($self === null) {
+            $self = $this->main = new MyCoroutine(($this->currentContinuation)());
+            $self->isMain = true;
+        }
+
+        while (!$this->ready->isEmpty() || !$this->microtasks->isEmpty()) {
             while (!$this->microtasks->isEmpty()) {
                 ($this->microtasks->dequeue())();    // one tick of microtasks
             }
+
+            if ($this->ready->isEmpty()) {
+                break;                               // a real scheduler blocks in
+            }                                        // the reactor here
 
             $current = $this->ready->dequeue();
             $current->continuation ??= ($this->createContinuation)($current->body);
             $current->continuation->switchTo();      // or drive an adopted fiber;
         }                                            // a pendingError is thrown at the
                                                      // suspension point inside
-        return $current;                             // recorded as the current coroutine
+        return $self;    // this frame resumes when $self runs again: record it
     }
 
     public function onFiber(\Fiber $fiber): ?object
@@ -442,15 +483,17 @@ scheduler without changing any signature.
 
 ### Hook specification
 
-#### `onLaunch(Closure $createContinuation, Closure $currentCoroutine): ?object`
+#### `onLaunch(Closure $createContinuation, Closure $currentContinuation, Closure $currentCoroutine): ?object`
 
 Called once when the scheduler starts: for a C scheduler just before the script runs, for a PHP
 scheduler at registration (script code is already running). The engine hands a PHP scheduler its
 privileged capabilities as closures: `createContinuation(callable): Continuation` mints a
-continuation and `currentCoroutine(): ?object` returns the coroutine the engine records as running.
-Switching is not one of them: it is done either through the plain Fiber interface (for an adopted
-fiber) or on the Continuation itself (`$continuation->switchTo()`, for the scheduler's own
-coroutines). State initialisation belongs here; returns the coroutine now current, or null.
+continuation, `currentContinuation(): Continuation` captures the context that is currently
+running (how the main flow is adopted, see above), and `currentCoroutine(): ?object` returns the
+coroutine the engine records as running. Switching is not one of them: it is done either through
+the plain Fiber interface (for an adopted fiber) or on the Continuation itself
+(`$continuation->switchTo()`, for the scheduler's own coroutines). State initialisation belongs
+here; returns the coroutine now current, or null.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
@@ -461,10 +504,14 @@ reach waiting code. `false` means the coroutine was not accepted (for example du
 
 #### `onSuspend(bool $fromMain, bool $isBailout): ?object`
 
-The central scheduling hook: the current flow yields. The scheduler selects the next runnable
-coroutine, switches into its Continuation, and returns the coroutine now running; the engine
-records it as the current coroutine. `$fromMain` marks the end-of-main handover: instead of a
-single switch, the scheduler drains the remaining coroutines. `$isBailout` accompanies it when
+The central scheduling hook: the current flow yields. The scheduler first normalises the caller:
+on its first yield the main flow has no coroutine object yet, so the scheduler captures it with
+`currentContinuation`, wraps it and marks it *main* (see "The main flow is a coroutine too"). It
+then selects the next runnable coroutine and switches into its Continuation. The call returns
+when something switches back into the yielding flow; the scheduler returns that flow's coroutine
+object, and the engine records it as the current coroutine. `$fromMain` marks the end-of-main
+handover: instead of a single switch, the scheduler drains the remaining coroutines, and the
+hook returns the *main* coroutine. `$isBailout` accompanies it when
 the main flow terminated abnormally (`exit()`, a fatal error); in that case the scheduler may
 discard the remaining work instead of completing it. Note that this call can arrive while the
 engine is already terminating after a fatal error. It is the scheduler's last opportunity to
@@ -582,10 +629,10 @@ implicit start on the first asynchronous call.
   has already passed by the time userland code executes.
 - **End of main.** When the main script ends, the engine hands control to the scheduler with
   `onSuspend(fromMain: true)`. After a normal completion the scheduler drains the remaining
-  coroutines to completion; after an abnormal one (`exit()`, a fatal error) the same handover
-  carries `$isBailout = true`, and the scheduler decides whether to finish or discard the
-  remaining work; this is its last opportunity to release resources before the request is torn
-  down.
+  coroutines to completion and returns the *main* coroutine (the main flow adopted at its first
+  yield); after an abnormal completion (`exit()`, a fatal error) the same handover carries
+  `$isBailout = true`, and the scheduler decides whether to finish or discard the remaining
+  work; this is its last opportunity to release resources before the request is torn down.
 - **After destructors.** Once object destructors have run, the scheduler receives one final
   `onSuspend(fromMain: true)` handover (destructors may have spawned coroutines). After it
   returns, concurrency is terminated and the rest of the request shutdown is synchronous.
