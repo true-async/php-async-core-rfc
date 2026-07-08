@@ -203,10 +203,25 @@ final class SchedulerHook
 }
 ```
 
-The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
-the engine performs the switch (mechanism). A scheduler drives its own coroutines by switching
-into their Continuation (`$continuation->switchTo()`), and adopted fibers (see `onFiber`) through
-the plain `Fiber` interface. Nothing switchable is reachable from application code.
+The hooks are simply the seam where a scheduler plugs its implementation into the engine: the
+engine calls them, and the scheduler supplies the behaviour. Everything a user sees (`spawn()`,
+`await()`, timers, channels) is ordinary code built on top of that seam.
+
+A non-blocking `sleep()`, for instance, is a handful of lines: it remembers the running coroutine,
+asks the scheduler to wake it after the delay, and yields, so the thread runs other coroutines
+instead of blocking:
+
+```php
+function sleep(float $seconds): void
+{
+    $coroutine = currentCoroutine();                          // the coroutine now running
+    Scheduler::instance()->wakeAfter($coroutine, $seconds);   // arm a timer on the reactor
+    Fiber::suspend();                                         // yield; others run meanwhile
+}
+```
+
+`currentCoroutine()` and `wakeAfter()` are the scheduler's own API (the timer lives in its
+reactor); the RFC standardises only the hooks underneath, not this user-facing surface.
 
 The **current coroutine** has no setter: it is whatever `onSuspend()` returns. The scheduler is
 the only party that knows which coroutine is now running, so it reports it through that return
