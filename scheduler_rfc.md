@@ -537,6 +537,8 @@ receives a real `Fiber` rather than a coroutine, because the fiber has not been 
 
 Queue a one-shot microtask; the scheduler runs it on its next tick. The engine never stores tasks:
 both `SchedulerHook::defer()` and C-level callers route here, and the queue lives in the scheduler.
+What microtasks are for, and the concurrent-iterator pattern built on them, is shown in
+"Microtasks in practice: a concurrent iterator" below.
 
 #### `onWaitInfo(object $coroutine, string $info): bool`
 
@@ -618,6 +620,49 @@ resolve to the registered scheduler's `getInternalContext()` / `contextFind()` /
 implementation, whether that scheduler is written in C or in PHP. This is also the pattern the
 *RFC Impact* section refers to: any extension can keep per-coroutine state the same way, keyed
 by its own allocated key, with cleanup tied to the coroutine's lifecycle.
+
+### Microtasks in practice: a concurrent iterator
+
+A microtask is the scheduler's smallest unit of work: a callable that runs inside the tick,
+between coroutine switches. It has no stack of its own and never suspends; it runs to completion
+right where the scheduler stands. That makes it far cheaper than a coroutine, and the right tool
+when logic must execute at scheduling points but does not itself wait: bookkeeping, waking
+sleepers, and incremental algorithms sliced across ticks.
+
+The classic use is a concurrent iterator. A plain `foreach` over a large collection inside a
+coroutine runs to completion before anyone else gets the CPU: cooperative scheduling switches
+only at yield points, and the loop has none. Rebuilt on microtasks, the same loop processes one
+chunk per tick and re-queues itself, so every other coroutine runs between the chunks:
+
+```php
+// Pseudocode: an iterator sliced across scheduler ticks. Each run handles one
+// chunk and re-queues itself; all other coroutines run between the chunks.
+function iterate(\Iterator $items, \Closure $handler, int $chunk = 64): void
+{
+    $step = function () use (&$step, $items, $handler, $chunk): void {
+        for ($i = 0; $i < $chunk && $items->valid(); $i++, $items->next()) {
+            $handler($items->current(), $items->key());
+        }
+
+        if ($items->valid()) {
+            Async\SchedulerHook::defer($step);    // not finished: next tick
+        }
+    };
+
+    Async\SchedulerHook::defer($step);
+}
+```
+
+This is not a toy pattern. TrueAsync's concurrent iterator
+([iterator.c](https://github.com/true-async/php-async/blob/main/iterator.c)) is exactly this
+shape in C: the iterator structure is itself a microtask; each run advances the iteration,
+spawns handler coroutines up to a concurrency limit, and re-queues itself. The engine relies on
+it in a critical place: in concurrent mode the garbage collector drives object destructors
+through a microtask that re-spawns the destructor coroutine on each tick
+(`gc_destructors_coroutine()` and `zend_gc_destructors_coroutine_microtask()` in
+[zend_gc.c](https://github.com/true-async/php-src/blob/true-async/Zend/zend_gc.c)): if a
+destructor suspends on I/O, the next tick continues the buffer in a fresh coroutine instead of
+stalling the collection cycle.
 
 ### Engine invocation points
 
