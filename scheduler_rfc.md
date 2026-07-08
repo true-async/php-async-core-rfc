@@ -563,6 +563,14 @@ extensions, keyed by process-unique numeric keys. These getters return the conte
 is read and written through the operations below. Whether a context is inherited along spawn
 chains is the scheduler's policy, not part of this contract.
 
+The two stores are separate for safety, not convenience. Internal-context values are raw C data
+(the worked example below stores a bare pointer), addressed by numeric keys that PHP code cannot
+even name. If C-extension state lived in the userland context, ordinary PHP code could reach it
+through the same context operations it uses for its own keys: overwrite a pointer, unset an
+entry whose memory C code still owns, and thereby corrupt C state or silently change core
+behaviour. The internal context is therefore structurally inaccessible from PHP; the boundary is
+enforced by construction rather than by convention.
+
 #### `contextFind(object $context, mixed $key): mixed` / `contextSet(...): bool` / `contextUnset(...): bool`
 
 Read, store, and remove values in a context. Keys are strings or objects (compared by identity).
@@ -621,6 +629,11 @@ implementation, whether that scheduler is written in C or in PHP. This is also t
 *RFC Impact* section refers to: any extension can keep per-coroutine state the same way, keyed
 by its own allocated key, with cleanup tied to the coroutine's lifecycle.
 
+Output buffering is not the only core subsystem that lives this way:
+[context_examples.md](context_examples.md) collects the worked examples, including
+`gethostbyname()`, whose traditional static result buffer becomes per-coroutine state through
+the same four-step pattern.
+
 ### Microtasks in practice: a concurrent iterator
 
 A microtask is the scheduler's smallest unit of work: a callable that runs inside the tick,
@@ -629,40 +642,77 @@ right where the scheduler stands. That makes it far cheaper than a coroutine, an
 when logic must execute at scheduling points but does not itself wait: bookkeeping, waking
 sleepers, and incremental algorithms sliced across ticks.
 
-The classic use is a concurrent iterator. A plain `foreach` over a large collection inside a
-coroutine runs to completion before anyone else gets the CPU: cooperative scheduling switches
-only at yield points, and the loop has none. Rebuilt on microtasks, the same loop processes one
-chunk per tick and re-queues itself, so every other coroutine runs between the chunks:
+The classic use is a concurrent iterator, and the engine's own pattern is worth copying
+precisely. The iteration state is shared. A worker coroutine drives a plain loop over it; the
+handler it calls is ordinary code and may suspend at any point. The microtask is the watchdog:
+it can only fire while the worker is parked (a running coroutine holds the thread until it
+yields), so when it does fire, it spawns a replacement worker over the same state, which becomes
+the new owner of the loop. When the old worker eventually resumes, it sees that it no longer
+owns the iteration and exits immediately. Iteration never stalls behind one slow element, and
+exactly one coroutine drives the loop at a time:
 
 ```php
-// Pseudocode: an iterator sliced across scheduler ticks. Each run handles one
-// chunk and re-queues itself; all other coroutines run between the chunks.
-function iterate(\Iterator $items, \Closure $handler, int $chunk = 64): void
+// Pseudocode: the engine's concurrent-iteration shape in PHP. spawn() and
+// currentCoroutine() are the scheduler's helpers, as in the earlier sections.
+final class ConcurrentIterator
 {
-    $step = function () use (&$step, $items, $handler, $chunk): void {
-        for ($i = 0; $i < $chunk && $items->valid(); $i++, $items->next()) {
-            $handler($items->current(), $items->key());
+    private ?object $owner = null;      // the coroutine currently driving the loop
+    private bool $done = false;
+
+    public function __construct(
+        private \Iterator $items,
+        private \Closure $handler,
+    ) {}
+
+    public function start(): void
+    {
+        Async\SchedulerHook::defer($this->tick(...));
+    }
+
+    /** The microtask: it fires only while the current worker is parked. */
+    private function tick(): void
+    {
+        if ($this->done) {
+            return;                     // finished: stop re-arming
         }
 
-        if ($items->valid()) {
-            Async\SchedulerHook::defer($step);    // not finished: next tick
-        }
-    };
+        $this->owner = spawn($this->run(...));        // replacement takes the state over
+        Async\SchedulerHook::defer($this->tick(...)); // re-arm for the next tick
+    }
 
-    Async\SchedulerHook::defer($step);
+    /** The loop a worker runs. The handler may suspend anywhere. */
+    private function run(): void
+    {
+        $me = currentCoroutine();
+
+        while (!$this->done && $this->items->valid()) {
+            $item = $this->items->current();
+            $key = $this->items->key();
+            $this->items->next();       // advance before the handler, like foreach
+
+            ($this->handler)($item, $key);   // may suspend: the microtask then
+                                             // staffs a replacement worker
+            if ($this->owner !== $me) {
+                return;                 // someone took over while we slept:
+            }                           // exit at once, exactly one driver
+        }
+
+        $this->done = true;             // finished while still the owner
+    }
 }
 ```
 
-This is not a toy pattern. TrueAsync's concurrent iterator
-([iterator.c](https://github.com/true-async/php-async/blob/main/iterator.c)) is exactly this
-shape in C: the iterator structure is itself a microtask; each run advances the iteration,
-spawns handler coroutines up to a concurrency limit, and re-queues itself. The engine relies on
-it in a critical place: in concurrent mode the garbage collector drives object destructors
-through a microtask that re-spawns the destructor coroutine on each tick
-(`gc_destructors_coroutine()` and `zend_gc_destructors_coroutine_microtask()` in
-[zend_gc.c](https://github.com/true-async/php-src/blob/true-async/Zend/zend_gc.c)): if a
-destructor suspends on I/O, the next tick continues the buffer in a fresh coroutine instead of
-stalling the collection cycle.
+This is exactly how the engine runs object destructors during GC in concurrent mode.
+`gc_destructors_coroutine()` re-arms the microtask and iterates the destructor buffer; if a
+destructor suspends, the next tick's microtask (`zend_gc_destructors_coroutine_microtask()`)
+spawns a fresh destructor coroutine that continues from the shared index and becomes the owner,
+and the displaced one exits through the identity check
+(`GC_G(dtor_coroutine) != ZEND_ASYNC_CURRENT_COROUTINE`); see
+[zend_gc.c](https://github.com/true-async/php-src/blob/true-async/Zend/zend_gc.c). TrueAsync's
+general-purpose concurrent iterator
+([iterator.c](https://github.com/true-async/php-async/blob/main/iterator.c)) generalises the
+same shape: the iterator structure is itself the microtask, and it staffs worker coroutines up
+to a configurable concurrency limit over one shared position.
 
 ### Engine invocation points
 
@@ -809,6 +859,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 - `Io\Poll` (`main/php_poll.h`): the readiness-multiplexing API in php-src master, suitable as the
   IO source for a userland event loop.
 - [SCHEDULER.md](SCHEDULER.md): the exact engine invocation points, for implementers.
+- [context_examples.md](context_examples.md): how PHP core uses the per-coroutine contexts
+  (`ob_start()` buffering, `gethostbyname()`), and why the internal context is isolated from
+  userland.
 
 ## Rejected Features
 
