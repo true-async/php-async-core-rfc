@@ -132,9 +132,10 @@ interface Scheduler
      * capabilities as plain closures (a C scheduler reaches the primitives
      * directly and receives none). Because they arrive only here, only the
      * scheduler holds them: no other code can mint continuations or read the
-     * current coroutine. Switching is done on the Continuation itself, so it is
-     * not one of these closures. Returns the coroutine now current (or null); the
-     * engine records it, same as onSuspend().
+     * current coroutine. Switching is not one of these closures: it is done either
+     * through the plain Fiber interface (for an adopted fiber) or on the
+     * Continuation itself (for the scheduler's own coroutines). Returns the
+     * coroutine now current (or null); the engine records it, same as onSuspend().
      */
     public function onLaunch(
         \Closure $createContinuation,  // createContinuation(callable $entry): Continuation
@@ -264,8 +265,9 @@ Called once when the scheduler starts: for a C scheduler just before the script 
 scheduler at registration (script code is already running). The engine hands a PHP scheduler its
 privileged capabilities as closures: `createContinuation(callable): Continuation` mints a
 continuation and `currentCoroutine(): ?object` returns the coroutine the engine records as running.
-Switching is done on the Continuation itself (`$continuation->switchTo()`), so it is not one of
-them. State initialisation belongs here; returns the coroutine now current, or null.
+Switching is not one of them: it is done either through the plain Fiber interface (for an adopted
+fiber) or on the Continuation itself (`$continuation->switchTo()`, for the scheduler's own
+coroutines). State initialisation belongs here; returns the coroutine now current, or null.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
