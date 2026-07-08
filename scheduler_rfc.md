@@ -447,7 +447,9 @@ as a working stack, what becomes possible once PHP can switch into a concurrent 
   HTTP/2 and SSE map cleanly onto coroutines (one coroutine per stream/connection), and a stateful
   runtime reuses connection pools and initialised services across requests instead of rebuilding
   them per request. In synthetic benchmarks the C server matches C/Rust implementations, and on
-  real workloads it shows a substantial practical gain.
+  real workloads it shows a substantial practical gain. There is also a working integration with
+  the existing [FrankenPHP](https://github.com/true-async/frankenphp) app server, so an established
+  runtime can adopt the coroutine model rather than being replaced.
 
 - **Integrations.** The same model absorbs inherently concurrent external systems as ordinary
   coroutine code: [Temporal](https://github.com/true-async/php-temporal) (workflow orchestration),
