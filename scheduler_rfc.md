@@ -79,14 +79,6 @@ registered scheduler does.
 namespace Async;
 
 /**
- * Base cancellation exception. Extends \Error on purpose (not \Exception), so a
- * stray catch (\Exception) cannot swallow a cancellation. To cancel a coroutine,
- * resume it with one of these; the throwable is raised at the coroutine's
- * suspension point. There is no separate cancel hook.
- */
-class CancellationError extends \Error {}
-
-/**
  * The low-level symmetric-switch primitive: a bare execution context. Minted via
  * the createContinuation capability; it is *not* the schedulable unit, a scheduler
  * wraps a Continuation into its own coroutine object. Switching is done on the
@@ -138,9 +130,9 @@ interface Scheduler
 
     /**
      * Make a coroutine runnable: the single "schedule it" operation (a fresh
-     * enqueue and a resume are the same thing). A non-null `$error` (typically a
-     * CancellationError) is raised at the coroutine's suspension point; that is
-     * how cancellation and IO/timeout failures reach waiting code.
+     * enqueue and a resume are the same thing). A non-null `$error` is raised at
+     * the coroutine's suspension point; that is how cancellation and IO/timeout
+     * failures reach waiting code.
      */
     public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool;
 
@@ -245,8 +237,8 @@ initialisation belongs here; returns the coroutine now current, or null.
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
 Make a coroutine runnable and place it in the run queue. Enqueuing a fresh coroutine and resuming
-a suspended one are the same operation. A non-null `$error` (typically a `CancellationError`) is
-raised at the coroutine's suspension point, which is how cancellation and IO/timeout failures
+a suspended one are the same operation. A non-null `$error` is raised at the coroutine's
+suspension point, which is how cancellation and IO/timeout failures
 reach waiting code. `false` means the coroutine was not accepted (for example during shutdown).
 
 #### `onSuspend(bool $fromMain, bool $isBailout): ?object`
@@ -280,8 +272,8 @@ both `SchedulerHook::defer()` and C-level callers route here, and the queue live
 #### `onShutdown(): bool`
 
 A graceful shutdown has been requested. The scheduler stops accepting new work and decides the
-fate of the remaining coroutines: run them to completion, or cancel them by enqueuing with a
-`CancellationError`.
+fate of the remaining coroutines: run them to completion, or cancel them by enqueuing with an
+error.
 
 #### `getContext(object $coroutine): object` / `getInternalContext(object $coroutine): object`
 
