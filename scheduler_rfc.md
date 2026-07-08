@@ -88,39 +88,43 @@ class CancellationError extends \Error {}
 
 /**
  * The low-level symmetric-switch primitive: a bare execution context. Minted via
- * the createContinuation capability and entered via switchTo (see onLaunch); it
- * is *not* the schedulable unit; a scheduler wraps a Continuation into its own
- * coroutine object. Internally backed by the engine's Fiber machinery, so it
+ * the createContinuation capability; it is *not* the schedulable unit, a scheduler
+ * wraps a Continuation into its own coroutine object. Switching is done on the
+ * Continuation itself. Internally backed by the engine's Fiber machinery, so it
  * stays compatible with fiber-aware tooling (e.g. Xdebug).
  */
-final class Continuation { /* opaque */ }
+final class Continuation
+{
+    /** Switch control into this continuation, optionally sending $value. */
+    public function switchTo(mixed $value = null): mixed {}
+}
 
 /**
  * A scheduler implements this interface and hands an instance to
  * SchedulerHook::register(). The `on*` methods are *event callbacks* the engine
  * invokes; the engine performs the actual context switches.
  *
- * Two layers. A `Continuation` is the low-level symmetric-switch primitive:
- * only `switchTo` and `createContinuation` touch it. A *coroutine* is the
- * schedulable unit the scheduler builds on top of a Continuation; the RFC does
- * not type it (it is the scheduler's own object). enqueue/suspend/context and
- * the current-coroutine accessor all speak in coroutines, not continuations.
+ * Two layers. A `Continuation` is the low-level symmetric-switch primitive,
+ * minted via createContinuation and entered with its own switchTo(). A
+ * *coroutine* is the schedulable unit the scheduler builds on top of a
+ * Continuation; the RFC does not type it (it is the scheduler's own object).
+ * enqueue/suspend/context and the current-coroutine accessor all speak in
+ * coroutines, not continuations.
  */
 interface Scheduler
 {
     /**
-     * The scheduler starts. The engine hands over its privileged, otherwise
-     * unreachable capabilities (the "mandate") as plain closures. Because they
-     * arrive only here, only the scheduler ever holds them: no other code can
-     * switch contexts or mint continuations. `currentCoroutine` returns the
-     * coroutine the engine currently records as running, ready to be handed to
-     * onEnqueue().
+     * The scheduler starts. The engine hands a PHP scheduler its mandate as plain
+     * closures (a C scheduler reaches the primitives directly and receives none).
+     * Because they arrive only here, only the scheduler holds them: no other code
+     * can mint continuations or read the current coroutine. Switching is done on
+     * the Continuation itself, so it is not part of the mandate. Returns the
+     * coroutine now current (or null); the engine records it, same as onSuspend().
      */
     public function onLaunch(
-        \Closure $switchTo,            // switchTo(Continuation $to, mixed $value = null): mixed
         \Closure $createContinuation,  // createContinuation(callable $entry): Continuation
         \Closure $currentCoroutine,    // currentCoroutine(): ?object
-    ): void;
+    ): ?object;
 
     /** A graceful shutdown has been requested. */
     public function onShutdown(): bool;
@@ -141,12 +145,12 @@ interface Scheduler
     public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool;
 
     /**
-     * The current coroutine yields. Pick who runs next and switch to it with the
-     * switchTo mandate; `$coroutine` is the one that just yielded. Return the
-     * coroutine now running; the engine records it as the current coroutine
-     * (this is the only way the current coroutine is set).
+     * The current flow yields. Pick who runs next and switch into it (with the
+     * Continuation's switchTo). Return the coroutine now running; the engine
+     * records it as the current coroutine (the only way it is set). `$fromMain`
+     * marks the end-of-main handover; `$isBailout` an abnormal termination.
      */
-    public function onSuspend(object $coroutine): ?object;
+    public function onSuspend(bool $fromMain, bool $isBailout): ?object;
 
     /** Store a one-shot microtask on the scheduler's queue. */
     public function onDefer(callable $task): bool;
@@ -191,9 +195,9 @@ PHP versions may append hooks, and a scheduler built against an earlier module A
 functional.
 
 The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
-the engine performs the switch (mechanism). A scheduler drives its own coroutines through the
-`switchTo` mandate handed to `onLaunch()`, and adopted fibers (see `onFiber`) through the plain
-`Fiber` interface. Nothing switchable is reachable from application code.
+the engine performs the switch (mechanism). A scheduler drives its own coroutines by switching
+into their Continuation (`$continuation->switchTo()`), and adopted fibers (see `onFiber`) through
+the plain `Fiber` interface. Nothing switchable is reachable from application code.
 
 The **current coroutine** has no setter: it is whatever `onSuspend()` returns. The scheduler is
 the only party that knows which coroutine is now running, so it reports it through that return
@@ -211,9 +215,9 @@ semantics are the scheduler's policy.
   `$this`, is type-checked at compile time, and grows by adding methods, the way
   `SessionHandlerInterface` and other engine integration points already work.
 
-- **The mandate as hidden closures.** `switchTo` and `createContinuation` are handed
-  to `onLaunch()` once, only to the scheduler: a capability, not a global function
-  or static method that any code could call.
+- **The mandate as hidden closures.** `createContinuation` and `currentCoroutine` are
+  handed to `onLaunch()` once, only to the scheduler: a capability, not a global
+  function or static method that any code could call.
 
 - **Continuation vs Fiber.** A `Fiber` is asymmetric (yields only to its resumer),
   so A → B costs two switches through an intermediary. A `Continuation` is
@@ -229,13 +233,14 @@ The hooks are the methods of `Async\Scheduler`. A hook the scheduler does not im
 engine's default behaviour. The hooks decide *which* coroutine runs next (policy); the engine
 performs the switch (mechanism).
 
-#### `onLaunch(Closure $switchTo, Closure $createContinuation, Closure $currentCoroutine): void`
+#### `onLaunch(Closure $createContinuation, Closure $currentCoroutine): ?object`
 
 Called once when the scheduler starts: for a C scheduler just before the script runs, for a PHP
-scheduler at registration (script code is already running). The engine hands over the mandate as
-closures: `switchTo(Continuation $to, mixed $value = null)` enters a continuation,
-`createContinuation(callable): Continuation` mints one, `currentCoroutine(): ?object` returns the
-coroutine the engine records as running. State initialisation belongs here.
+scheduler at registration (script code is already running). The engine hands a PHP scheduler its
+mandate as closures: `createContinuation(callable): Continuation` mints a continuation and
+`currentCoroutine(): ?object` returns the coroutine the engine records as running. Switching is
+done on the Continuation itself (`$continuation->switchTo()`), so it is not in the mandate. State
+initialisation belongs here; returns the coroutine now current, or null.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
@@ -244,12 +249,13 @@ a suspended one are the same operation. A non-null `$error` (typically a `Cancel
 raised at the coroutine's suspension point, which is how cancellation and IO/timeout failures
 reach waiting code. `false` means the coroutine was not accepted (for example during shutdown).
 
-#### `onSuspend(object $coroutine): ?object`
+#### `onSuspend(bool $fromMain, bool $isBailout): ?object`
 
-The central scheduling hook: the current coroutine yields. The scheduler selects the next runnable
-coroutine, enters it with `switchTo`, and returns the coroutine now running; the engine records it
-as the current coroutine. Once the run queue drains after the main script has finished, the
-scheduler runs the remaining coroutines to completion.
+The central scheduling hook: the current flow yields. The scheduler selects the next runnable
+coroutine, switches into its Continuation, and returns the coroutine now running; the engine
+records it as the current coroutine. `$fromMain` marks the end-of-main handover (drain the
+remaining coroutines to completion rather than a single switch); `$isBailout` an abnormal
+termination.
 
 #### `onFiber(Fiber $fiber): ?object`
 
