@@ -238,20 +238,22 @@ engine calls them, and the scheduler supplies the behaviour. Everything a user s
 
 A non-blocking `sleep()`, for instance, is a handful of lines: it remembers the running coroutine,
 arms a timer on PHP's built-in Poll API to wake it after the delay, and yields, so the thread runs
-other coroutines instead of blocking:
+other coroutines instead of blocking. In pseudocode:
 
 ```php
+// Pseudocode — the reactor/helper names are illustrative, not part of this RFC.
 function sleep(float $seconds): void
 {
     $coroutine = currentCoroutine();                       // the coroutine now running
     Poll::addTimer($seconds, static fn () =>               // PHP's built-in Poll (reactor) API
         resume($coroutine));                               // wake it when the timer fires
-    Fiber::suspend();                                      // yield; others run meanwhile
+    suspend();                                             // yield to the scheduler; others run
 }
 ```
 
-`Poll` is PHP's built-in event/reactor API; `currentCoroutine()` and `resume()` are the
-scheduler's user-facing helpers. The RFC standardises only the hooks underneath, not this surface.
+`Poll` is PHP's built-in event/reactor API; `currentCoroutine()`, `resume()` and `suspend()` are
+the scheduler's user-facing helpers (`suspend()` routes through the `onSuspend` hook). The RFC
+standardises only the hooks underneath, not this surface.
 
 The PHP core keeps track of **which coroutine is currently running**. It learns it from the
 scheduler: `onSuspend()` returns the coroutine object it switched to, and the core records that as
@@ -263,6 +265,45 @@ is **not part of this RFC**: like the coroutine object itself, it belongs to the
 The same split applies to **microtasks**: the one-shot callback queue is owned by the scheduler,
 not the engine. `defer()` only forwards the callable to `onDefer()`; storage, draining, and exact
 semantics are the scheduler's policy.
+
+### The scheduler and the reactor
+
+The scheduler owns coroutines and a run queue; a *reactor* (event loop over the OS: fds, timers,
+signals) is what makes I/O non-blocking. They are two halves of one loop and meet at exactly two
+points. The reactor itself is outside this RFC; its C-level interface is a separate document,
+[reactor.md](reactor.md).
+
+**1. A reactor callback wakes a coroutine.** A non-blocking operation arms an event on the reactor
+and suspends the coroutine; when the event fires, the reactor's callback hands the coroutine back
+to the scheduler (`onEnqueue`), moving it from *suspended* to *runnable*. The reactor never runs
+coroutine code — it only flips the coroutine to ready. This is exactly the `sleep()` above: its
+timer callback calls `resume($coroutine)`.
+
+**2. When idle, the scheduler blocks in the reactor.** When the run queue drains, the scheduler
+does not spin: from inside `onSuspend()` it asks the reactor to block until the next OS event. In
+pseudocode:
+
+```php
+// Pseudocode — the scheduler's onSuspend, blocking in the reactor when idle.
+public function onSuspend(bool $fromMain, bool $isBailout): ?object
+{
+    $current = null;
+
+    while ($this->hasLiveCoroutines()) {
+        if ($this->ready->isEmpty()) {
+            Poll::run(block: true);        // sleep in the kernel until an fd/timer fires;
+        }                                  // its callback re-queues the woken coroutine
+        $current = $this->ready->dequeue();
+        $current->switchTo();              // (or drive its adopted fiber)
+    }
+
+    return $current;
+}
+```
+
+Coroutines run until they all park on I/O; the queue empties; the scheduler blocks in the reactor;
+an OS event fires a callback; the callback re-queues a coroutine; the reactor returns and the
+scheduler switches into it. No coroutine is lost and the thread never busy-waits.
 
 ### Hook specification
 
