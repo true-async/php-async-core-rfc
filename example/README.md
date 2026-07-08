@@ -20,13 +20,9 @@ direct coroutine-to-coroutine jump. **Runs on today's engine.**
 ## [`continuation/`](continuation/) — Continuation (symmetric)
 
 The same scheduler via the *additional* `Continuation` API: coroutines are
-`Continuation`s (minted by the scheduler through the `createCoroutine` mandate),
-and the scheduler switches **directly** A → B with `switchTo` — one switch, no
-intermediary. Switching is a privilege handed only to the scheduler at `onLaunch`.
-
-**Illustrative:** uses the proposed `Continuation` / `switchTo` primitives, which
-are not in the engine yet, so this documents the design; it is not runnable until
-the C side lands.
+`Continuation`s (minted by the scheduler through the `createContinuation` mandate
+handed to `onLaunch`), and the scheduler switches **directly** into one with
+`$coroutine->switchTo()`: one switch, no intermediary. **Runs on today's engine.**
 
 - [`scheduler.php`](continuation/scheduler.php)
 

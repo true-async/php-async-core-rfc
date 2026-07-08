@@ -3,16 +3,15 @@
 /**
  * VARIANT B — cooperative scheduler on Continuations (symmetric).
  *
- * ILLUSTRATIVE: this uses the *proposed* API — Async\Continuation plus the
- * switchTo / createCoroutine mandate handed to onLaunch(). Those engine
- * primitives do not exist yet, so this file documents the design; it is not
- * runnable until the C side lands.
+ * Coroutines ARE Continuations (minted by the scheduler through the
+ * createContinuation mandate, no Fiber). The scheduler switches directly into a
+ * coroutine with $coroutine->switchTo(): a symmetric jump, no central hub.
  *
- * Coroutines ARE Continuations (created by the scheduler, no Fiber). The
- * scheduler switches directly A -> B with switchTo(): a symmetric jump, no
- * central pump, no {main} round-trip. Switching is a privilege: switchTo /
- * createCoroutine arrive only in onLaunch(), so nobody but the scheduler can
- * switch contexts.
+ * The mandate (createContinuation + currentCoroutine) arrives only in onLaunch(),
+ * so nobody but the scheduler can mint coroutines. Switching is a method on the
+ * Continuation the scheduler holds.
+ *
+ * Runs on the engine's Async\Continuation.
  */
 
 final class ContinuationScheduler implements \Async\Scheduler
@@ -20,10 +19,9 @@ final class ContinuationScheduler implements \Async\Scheduler
     public static ContinuationScheduler $instance;
     private \SplQueue $ready;
 
-    /** The secret mandate — held only by the scheduler. */
-    private \Closure $switchTo;         // switchTo(Continuation $to, mixed $value = null): mixed
-    private \Closure $createCoroutine;  // createCoroutine(callable $entry): Continuation
-    private \Closure $currentCoroutine; // currentCoroutine(): ?Continuation
+    /** The mandate — held only by the scheduler. */
+    private \Closure $createContinuation;  // createContinuation(callable $entry): Continuation
+    private \Closure $currentCoroutine;    // currentCoroutine(): ?object
 
     public function __construct()
     {
@@ -31,50 +29,47 @@ final class ContinuationScheduler implements \Async\Scheduler
         $this->ready    = new \SplQueue();
     }
 
-    /** The engine hands the privileged functions once, at start. */
-    public function onLaunch(callable $switchTo, callable $createCoroutine, callable $currentCoroutine): void
+    /** The engine hands the mandate once, at start. */
+    public function onLaunch(\Closure $createContinuation, \Closure $currentCoroutine): ?object
     {
-        $this->switchTo         = $switchTo;
-        $this->createCoroutine  = $createCoroutine;
-        $this->currentCoroutine = $currentCoroutine;
+        $this->createContinuation = $createContinuation;
+        $this->currentCoroutine   = $currentCoroutine;
+        return null;
     }
 
     /** Spawn: the scheduler mints its OWN coroutine as a Continuation. */
     public function spawn(callable $task): void
     {
-        $this->ready->enqueue(($this->createCoroutine)($task));
+        $this->ready->enqueue(($this->createContinuation)($task));
     }
 
-    /** A coroutine yielded. Reschedule it, then jump DIRECTLY to the next. */
-    public function onSuspend(\Async\Continuation $current): void
+    /**
+     * End of main: the engine hands us control (onSuspend with $fromMain). We
+     * switch into each ready coroutine in turn with switchTo() — a direct
+     * symmetric jump into the Continuation, no intermediary.
+     */
+    public function onSuspend(bool $fromMain, bool $isBailout): ?object
     {
-        $this->ready->enqueue($current);
+        if (!$fromMain || $isBailout) {
+            return null;
+        }
 
-        // <-- the switch: a direct symmetric jump A -> B. No pump, no {main}.
-        //     The engine records the target as the current coroutine.
-        ($this->switchTo)($this->ready->dequeue());
+        while (!$this->ready->isEmpty()) {
+            $this->ready->dequeue()->switchTo();
+        }
+
+        return null;
     }
 
-    public function onEnqueue(\Async\Continuation $coroutine): bool
+    public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool
     {
         $this->ready->enqueue($coroutine);
         return true;
     }
 
-    public function onResume(\Async\Continuation $coroutine, ?\Throwable $error = null): bool
-    {
-        $this->ready->enqueue($coroutine);   // deferred wake
-        return true;
-    }
-
-    public function onCancel(\Async\Continuation $coroutine, ?\Throwable $error = null): bool
-    {
-        return true;
-    }
-
     // This scheduler runs only its own Continuations, so it adopts no foreign
-    // fibers (a Revolt/AMPHP-hosting scheduler would return a Continuation here).
-    public function onFiber(\Fiber $fiber): ?\Async\Continuation
+    // fibers (a Revolt/AMPHP-hosting scheduler would return a coroutine here).
+    public function onFiber(\Fiber $fiber): ?object
     {
         return null;
     }
@@ -82,29 +77,21 @@ final class ContinuationScheduler implements \Async\Scheduler
     public function onShutdown(): bool { return true; }
     public function onDefer(callable $task): bool { return false; }
 
-    public function getContext(\Async\Continuation $coroutine): ?object { return null; }
-    public function getInternalContext(\Async\Continuation $coroutine): ?object { return null; }
-    public function contextFind(object $context, mixed $key, bool $includeParent): mixed { return null; }
+    public function getContext(object $coroutine): object { return new \stdClass(); }
+    public function getInternalContext(object $coroutine): object { return new \stdClass(); }
+    public function contextFind(object $context, mixed $key): mixed { return null; }
     public function contextSet(object $context, mixed $key, mixed $value): bool { return false; }
     public function contextUnset(object $context, mixed $key): bool { return false; }
 }
 
-// --- user-facing helpers ---------------------------------------------------
+// --- user-facing helper ----------------------------------------------------
 
 function spawn(callable $task): void
 {
     ContinuationScheduler::$instance->spawn($task);
 }
 
-/** Yield: the engine calls onSuspend(), which switches straight to the next. */
-function yield_(): void
-{
-    // A userland yield still routes through the scheduler's onSuspend hook;
-    // the scheduler does the direct switchTo. No self-reschedule dance needed.
-    \Async\suspend();   // (illustrative primitive)
-}
-
-// --- demo (illustrative — does not run yet) --------------------------------
+// --- demo ------------------------------------------------------------------
 
 \Async\SchedulerHook::register('continuation', new ContinuationScheduler());
 
@@ -112,11 +99,10 @@ function worker(string $name, int $steps): void
 {
     for ($i = 1; $i <= $steps; $i++) {
         echo "    [$name] step $i\n";
-        yield_();
     }
 }
 
 echo "main: spawn A, B (continuations)\n";
 spawn(fn () => worker('A', 3));
-spawn(fn () => worker('B', 3));
-echo "main: end — coroutines switch directly A<->B, no pump\n";
+spawn(fn () => worker('B', 2));
+echo "main: end — scheduler switches directly into each continuation\n";
