@@ -322,35 +322,6 @@ getters return the context object, read and written through the operations below
 Read, store, and remove values in a context. Keys are strings or objects (compared by identity).
 The internal context is operated on by C extensions directly, not through PHP.
 
-### Responsibilities not registered from PHP
-
-A scheduler also fulfils responsibilities that are part of the C contract but are not exposed as
-scheduler hooks, because they involve creating opaque engine values or
-numeric C keys that a pure-PHP scheduler cannot produce. A C-implemented scheduler provides them
-directly:
-
-- **Coroutine creation.** The coroutine object is defined and created by the scheduler; the core
-  only records the offset it needs to bridge a coroutine to its object. Nothing about coroutine
-  construction is registered from PHP.
-- **Wait diagnostics** (`awaiting_info`). Whoever suspends a coroutine may attach a handler that
-  returns a human-readable description of what it is waiting for (`"socket #7 (readable)"`), used
-  by introspection tooling and deadlock reports. It is a per-coroutine handler, not a scheduler
-  registration.
-- **Destructor-phase interception** (`gc_destructors`). The around-interceptor for the garbage
-  collector's destructor phase: when the GC reaches the point where destructors of collected
-  cycles must run, it can call this instead of executing the phase directly, bracket it (open a
-  completion group, run, await everything the destructors spawned, including transitive
-  descendants) and only then let collection proceed. **This is reserved for C extensions and is
-  not available to PHP-land, by nature of *when* it runs.** The destructor phase fires at the
-  very latest stage of the request, during and after the teardown of global variables and the
-  object store, when userland is already being dismantled and no PHP-registered scheduler can be
-  safely re-entered. Only C code lives at that stage, so only a C-implemented scheduler (or the
-  engine itself) may hook it; a pure-PHP scheduler cannot. The engine keeps every correctness
-  guarantee regardless: destructors are invoked by the engine executor (each exactly once), and
-  after the interceptor returns the engine re-runs the executor as a safety net, so a broken or
-  absent hook cannot prevent destructors from being called. Without it, the classic synchronous
-  destructor path runs unchanged, and userland `__destruct` always takes that classic path.
-
 ### Engine invocation points
 
 The scheduler is **always active**. There is no lazy initialization and no implicit start on the
