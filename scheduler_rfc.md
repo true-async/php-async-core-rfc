@@ -91,7 +91,8 @@ speak in coroutines; which primitive backs a given coroutine (a fiber or a conti
 scheduler's implementation choice.
 
 Two orthogonal attributes may additionally apply: *cancelled* (cancellation has been requested)
-and *main* (the coroutine that wraps the top-level script). Each coroutine records its
+and *main* (the coroutine that wraps the top-level script; how it comes to exist is described in
+"The main flow is a coroutine too"). Each coroutine records its
 completion result or unhandled exception, the source location at which it was spawned, and, while
 suspended, a description of what it is waiting for (see the `onWaitInfo` hook).
 
@@ -331,6 +332,17 @@ object, and marks it *main* (the attribute from the Coroutines section). From th
 top-level script is suspended, enqueued and resumed like any other coroutine; nothing in the
 scheduler treats it specially afterwards.
 
+That uniformity is the point. If the main flow stayed special, every path through a scheduler
+would fork in two: switch into a coroutine or back into main, cancel a coroutine or shield main,
+queue coroutines but keep a dedicated slot for the one flow that is not one. Adopting main once,
+at its first yield, deletes the second branch everywhere: the queues hold one type, the switch
+path is single, cancellation and introspection see only ordinary coroutines. State becomes
+uniform for the same reason: the per-coroutine machinery, the two contexts and the wait-info
+descriptions, applies to the main flow simply because it is a coroutine. Output buffering shows
+this concretely: buffers opened by the plain request flow move into the main coroutine's context
+when concurrency starts (see [context_examples.md](context_examples.md)), rather than living in
+a main-only global beside everyone else's per-coroutine state.
+
 This normalisation also pins down the return value of `onSuspend()` precisely. The call returns
 when something switches back into the yielding flow, and the flow running at that moment is
 exactly the one the hook normalised: so the scheduler returns that coroutine object, and the
@@ -499,8 +511,8 @@ here; returns the coroutine now current, or null.
 
 Make a coroutine runnable and place it in the run queue. Enqueuing a fresh coroutine and resuming
 a suspended one are the same operation. A non-null `$error` is raised at the coroutine's
-suspension point, which is how cancellation and IO/timeout failures
-reach waiting code. `false` means the coroutine was not accepted (for example during shutdown).
+suspension point, which is how cancellation and IO/timeout failures reach waiting code. `false`
+means the coroutine was not accepted (for example during shutdown).
 
 #### `onSuspend(bool $fromMain, bool $isBailout): ?object`
 
@@ -510,13 +522,12 @@ on its first yield the main flow has no coroutine object yet, so the scheduler c
 then selects the next runnable coroutine and switches into its Continuation. The call returns
 when something switches back into the yielding flow; the scheduler returns that flow's coroutine
 object, and the engine records it as the current coroutine. `$fromMain` marks the end-of-main
-handover: instead of a single switch, the scheduler drains the remaining coroutines, and the
-hook returns the *main* coroutine. `$isBailout` accompanies it when
-the main flow terminated abnormally (`exit()`, a fatal error); in that case the scheduler may
-discard the remaining work instead of completing it. Note that this call can arrive while the
-engine is already terminating after a fatal error. It is the scheduler's last opportunity to
-clean up: release connections and cancel the remaining coroutines so that their cleanup
-handlers run before the request is torn down.
+handover: instead of a single switch, the scheduler drains the remaining coroutines, and the hook
+returns the *main* coroutine. `$isBailout` accompanies it when the main flow terminated
+abnormally (`exit()`, a fatal error); the scheduler may then discard the remaining work instead
+of completing it. This call can arrive while the engine is already terminating after a fatal
+error, and it is the scheduler's last opportunity to clean up: release connections and cancel
+the remaining coroutines so that their cleanup handlers run before the request is torn down.
 
 #### `onFiber(Fiber $fiber): ?object`
 
@@ -565,11 +576,12 @@ chains is the scheduler's policy, not part of this contract.
 
 The two stores are separate for safety, not convenience. Internal-context values are raw C data
 (the worked examples in [context_examples.md](context_examples.md) store bare pointers),
-addressed by numeric keys that PHP code cannot even name. If C-extension state lived in the userland context, ordinary PHP code could reach it
-through the same context operations it uses for its own keys: overwrite a pointer, unset an
-entry whose memory C code still owns, and thereby corrupt C state or silently change core
-behaviour. The internal context is therefore structurally inaccessible from PHP; the boundary is
-enforced by construction rather than by convention.
+addressed by numeric keys that PHP code cannot even name. If C-extension state lived in the
+userland context, ordinary PHP code could reach it through the same context operations it uses
+for its own keys: overwrite a pointer, unset an entry whose memory C code still owns, and
+thereby corrupt C state or silently change core behaviour. The internal context is therefore
+structurally inaccessible from PHP; the boundary is enforced by construction rather than by
+convention.
 
 #### `contextFind(object $context, mixed $key): mixed` / `contextSet(...): bool` / `contextUnset(...): bool`
 
@@ -647,7 +659,8 @@ precisely. The iteration state is shared. A worker coroutine drives a plain loop
 handler it calls is ordinary code and may suspend at any point. The microtask is the watchdog:
 it can only fire while the worker is parked (a running coroutine holds the thread until it
 yields), so when it does fire, it spawns a replacement worker over the same state, which becomes
-the new owner of the loop. When the old worker eventually resumes, it sees that it no longer
+the new owner of the loop; each worker re-arms the watchdog as it starts, so one parked worker
+begets exactly one successor. When the old worker eventually resumes, it sees that it no longer
 owns the iteration and exits immediately. Iteration never stalls behind one slow element, and
 exactly one coroutine drives the loop at a time:
 
@@ -673,17 +686,17 @@ final class ConcurrentIterator
     private function tick(): void
     {
         if ($this->done) {
-            return;                     // finished: stop re-arming
+            return;                     // finished: nothing left to staff
         }
 
-        $this->owner = spawn($this->run(...));        // replacement takes the state over
-        Async\SchedulerHook::defer($this->tick(...)); // re-arm for the next tick
+        $this->owner = spawn($this->run(...));   // replacement takes the state over
     }
 
     /** The loop a worker runs. The handler may suspend anywhere. */
     private function run(): void
     {
         $me = currentCoroutine();
+        Async\SchedulerHook::defer($this->tick(...));   // arm the watchdog for this run
 
         while (!$this->done && $this->items->valid()) {
             $item = $this->items->current();
