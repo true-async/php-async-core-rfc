@@ -223,10 +223,10 @@ function sleep(float $seconds): void
 `currentCoroutine()` and `wakeAfter()` are the scheduler's own API (the timer lives in its
 reactor); the RFC standardises only the hooks underneath, not this user-facing surface.
 
-The **current coroutine** has no setter: it is whatever `onSuspend()` returns. The scheduler is
-the only party that knows which coroutine is now running, so it reports it through that return
-value, the engine records it, and hands it back through the `currentCoroutine` mandate. How the
-coroutine is exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`)
+The PHP core keeps track of **which coroutine is currently running**. It learns it from the
+scheduler: `onSuspend()` returns the coroutine object it switched to, and the core records that as
+the current coroutine. The scheduler reads it back through the `currentCoroutine` mandate. How the
+coroutine is then exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`)
 is **not part of this RFC**: like the coroutine object itself, it belongs to the scheduler's API.
 
 The same split applies to **microtasks**: the one-shot callback queue is owned by the scheduler,
