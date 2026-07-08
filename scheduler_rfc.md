@@ -171,6 +171,13 @@ interface Scheduler
     /** Store a one-shot microtask on the scheduler's queue. */
     public function onDefer(callable $task): bool;
 
+    /**
+     * Record a human-readable description of what `$coroutine` is currently
+     * waiting for (e.g. "socket #7 (readable)"), attached by whoever suspended it.
+     * Used by introspection tooling and deadlock reports.
+     */
+    public function onWaitInfo(object $coroutine, string $info): bool;
+
     // --- Coroutine context (queries/providers, not events, so no on-prefix) ---
 
     /** The coroutine's userland context (string/object keys). */
@@ -303,6 +310,13 @@ receives a real `Fiber` rather than a coroutine, because the fiber has not been 
 
 Queue a one-shot microtask; the scheduler runs it on its next tick. The engine never stores tasks:
 both `SchedulerHook::defer()` and C-level callers route here, and the queue lives in the scheduler.
+
+#### `onWaitInfo(object $coroutine, string $info): bool`
+
+Whoever suspends a coroutine may describe *what it is waiting for* in a human-readable string
+(`"socket #7 (readable)"`, `"channel recv"`, …). This hook hands that description to the scheduler,
+which stores it against the coroutine for introspection tooling and deadlock reports. It carries
+no scheduling effect.
 
 #### `onShutdown(): bool`
 
