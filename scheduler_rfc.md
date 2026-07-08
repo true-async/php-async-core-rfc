@@ -442,14 +442,16 @@ as a working stack, what becomes possible once PHP can switch into a concurrent 
   [symfony-spawn](https://github.com/YanGusik/symfony-spawn), and the
   [thrun](https://github.com/YanGusik/thrun) runtime.
 
-- **The server as a first-class citizen.** A long-lived, coroutine-driven server is the natural
-  host: gRPC, WebSocket, HTTP/3, HTTP/2 and SSE map cleanly onto coroutines (one coroutine per
-  stream/connection), and a stateful runtime reuses connection pools and initialised services
-  across requests instead of rebuilding them per request. In synthetic benchmarks the C server
-  matches C/Rust implementations, and on real workloads it shows a substantial practical gain.
+- **The server as a first-class citizen.** A long-lived, coroutine-driven
+  [server](https://github.com/true-async/server) is the natural host: gRPC, WebSocket, HTTP/3,
+  HTTP/2 and SSE map cleanly onto coroutines (one coroutine per stream/connection), and a stateful
+  runtime reuses connection pools and initialised services across requests instead of rebuilding
+  them per request. In synthetic benchmarks the C server matches C/Rust implementations, and on
+  real workloads it shows a substantial practical gain.
 
-- **Integrations.** The same model absorbs inherently concurrent external systems — Temporal
-  (workflow orchestration), ClickHouse, and other network services — as ordinary coroutine code.
+- **Integrations.** The same model absorbs inherently concurrent external systems as ordinary
+  coroutine code: [Temporal](https://github.com/true-async/php-temporal) (workflow orchestration),
+  [ClickHouse](https://github.com/true-async/php-clickhouse), and other network services.
 
 - **Beyond the server.** A [native bridge](https://github.com/true-async/native-bridge) explores
   running the same concurrency model on mobile/native targets, extending PHP's reach beyond the
