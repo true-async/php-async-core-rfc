@@ -414,6 +414,47 @@ Next minor PHP 8.x.
 - **To the Ecosystem:** a stub for one class. Event-loop libraries (Revolt, ReactPHP, AMPHP,
   Swoole) obtain a common registration point in place of private, incompatible cores.
 
+## Impact on the ecosystem and prospects
+
+This RFC standardises only the activation seam, but that seam is what an entire concurrency
+ecosystem builds on. The [TrueAsync project](https://github.com/true-async) already demonstrates,
+in production, what becomes possible once PHP can switch into a concurrent mode.
+
+- **Efficiency.** With transparent async I/O a coroutine costs a fraction of a thread: TrueAsync
+  measures roughly **20× less memory** for the same concurrency (54 MiB vs 1.08 GB) and up to
+  **13× higher throughput** on IO-bound workloads at identical CPU utilisation. As applications
+  shift toward IO-bound work (microservices, cloud APIs), this moves async from a niche
+  optimisation to the default shape and brings PHP to throughput parity with Node.js/Python
+  without an architectural rewrite — with the optimal concurrency computable rather than guessed
+  (`N ≈ 1 + T_io / T_cpu`). See the
+  [concurrency-efficiency evidence](https://true-async.github.io/en/docs/evidence/concurrency-efficiency.html).
+
+- **Transparent async, no code changes.** Because blocking I/O becomes non-blocking underneath,
+  existing PHP code runs concurrently unchanged: a call that would block yields instead. Field use
+  of transparent asynchrony has proved markedly more convenient than the explicit async of Go or
+  Python — there is no `async`/`await` colouring and no separate blocking vs non-blocking APIs to
+  learn; ordinary sequential code simply scales.
+
+- **Frameworks.** Laravel and Symfony gain concurrency through thin adapters rather than forks:
+  [laravel-spawn](https://github.com/YanGusik/laravel-spawn),
+  [symfony-spawn](https://github.com/YanGusik/symfony-spawn), and the
+  [thrun](https://github.com/YanGusik/thrun) runtime.
+
+- **The server as a first-class citizen.** A long-lived, coroutine-driven server is the natural
+  host: gRPC, WebSocket, HTTP/3, HTTP/2 and SSE map cleanly onto coroutines (one coroutine per
+  stream/connection), and a stateful runtime reuses connection pools and initialised services
+  across requests instead of rebuilding them per request.
+
+- **Integrations.** The same model absorbs inherently concurrent external systems — Temporal
+  (workflow orchestration), ClickHouse, and other network services — as ordinary coroutine code.
+
+- **Beyond the server.** A [native bridge](https://github.com/true-async/native-bridge) explores
+  running the same concurrency model on mobile/native targets, extending PHP's reach beyond the
+  classic request/response host.
+
+None of this is defined by this RFC — but all of it depends on the single activation contract it
+standardises.
+
 ## Voting Choices
 
 Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
@@ -432,7 +473,10 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 - [TrueAsync scheduler extension](https://github.com/true-async/true-async): the reference
   implementation of the hooks.
 - [TrueAsync project](https://github.com/true-async): the full stack from which this core was
-  extracted.
+  extracted, including the framework adapters, server and integrations referenced above.
+- [TrueAsync documentation](https://true-async.github.io): guides, benchmarks and evidence.
+- [Concurrency efficiency](https://true-async.github.io/en/docs/evidence/concurrency-efficiency.html):
+  the memory and throughput measurements behind the ecosystem-impact section.
 - `Io\Poll` (`main/php_poll.h`): the readiness-multiplexing API in php-src master, suitable as the
   IO source for a userland event loop.
 - [SCHEDULER.md](SCHEDULER.md): the exact engine invocation points, for implementers.
