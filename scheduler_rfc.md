@@ -128,12 +128,13 @@ final class Continuation
 interface Scheduler
 {
     /**
-     * The scheduler starts. The engine hands a PHP scheduler its mandate as plain
-     * closures (a C scheduler reaches the primitives directly and receives none).
-     * Because they arrive only here, only the scheduler holds them: no other code
-     * can mint continuations or read the current coroutine. Switching is done on
-     * the Continuation itself, so it is not part of the mandate. Returns the
-     * coroutine now current (or null); the engine records it, same as onSuspend().
+     * The scheduler starts. The engine hands a PHP scheduler its privileged
+     * capabilities as plain closures (a C scheduler reaches the primitives
+     * directly and receives none). Because they arrive only here, only the
+     * scheduler holds them: no other code can mint continuations or read the
+     * current coroutine. Switching is done on the Continuation itself, so it is
+     * not one of these closures. Returns the coroutine now current (or null); the
+     * engine records it, same as onSuspend().
      */
     public function onLaunch(
         \Closure $createContinuation,  // createContinuation(callable $entry): Continuation
@@ -203,44 +204,14 @@ final class SchedulerHook
 }
 ```
 
-The hooks are simply the seam where a scheduler plugs its implementation into the engine: the
-engine calls them, and the scheduler supplies the behaviour. Everything a user sees (`spawn()`,
-`await()`, timers, channels) is ordinary code built on top of that seam.
-
-A non-blocking `sleep()`, for instance, is a handful of lines: it remembers the running coroutine,
-asks the scheduler to wake it after the delay, and yields, so the thread runs other coroutines
-instead of blocking:
-
-```php
-function sleep(float $seconds): void
-{
-    $coroutine = currentCoroutine();                          // the coroutine now running
-    Scheduler::instance()->wakeAfter($coroutine, $seconds);   // arm a timer on the reactor
-    Fiber::suspend();                                         // yield; others run meanwhile
-}
-```
-
-`currentCoroutine()` and `wakeAfter()` are the scheduler's own API (the timer lives in its
-reactor); the RFC standardises only the hooks underneath, not this user-facing surface.
-
-The PHP core keeps track of **which coroutine is currently running**. It learns it from the
-scheduler: `onSuspend()` returns the coroutine object it switched to, and the core records that as
-the current coroutine. The scheduler reads it back through the `currentCoroutine` mandate. How the
-coroutine is then exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`)
-is **not part of this RFC**: like the coroutine object itself, it belongs to the scheduler's API.
-
-The same split applies to **microtasks**: the one-shot callback queue is owned by the scheduler,
-not the engine. `defer()` only forwards the callable to `onDefer()`; storage, draining, and exact
-semantics are the scheduler's policy.
-
 ### Design rationale
 
 - **An interface, not an array of callables.** A real object shares state through
   `$this`, is type-checked at compile time, and grows by adding methods, the way
   `SessionHandlerInterface` and other engine integration points already work.
 
-- **The mandate as hidden closures.** `createContinuation` and `currentCoroutine` are
-  handed to `onLaunch()` once, only to the scheduler: a capability, not a global
+- **Privileged operations as hidden closures.** `createContinuation` and `currentCoroutine`
+  are handed to `onLaunch()` once, only to the scheduler: a capability, not a global
   function or static method that any code could call.
 
 - **Continuation vs Fiber.** A `Fiber` is asymmetric (yields only to its resumer),
@@ -251,20 +222,50 @@ semantics are the scheduler's policy.
 - **Xdebug-compatible.** A `Continuation` is built on the same `zend_fiber_context`
   the `Fiber` API uses, so step debugging and stack traces keep working.
 
-### Hook specification
+### How a scheduler is used
 
-The hooks are the methods of `Async\Scheduler`. A hook the scheduler does not implement keeps the
-engine's default behaviour. The hooks decide *which* coroutine runs next (policy); the engine
-performs the switch (mechanism).
+The hooks are simply the seam where a scheduler plugs its implementation into the engine: the
+engine calls them, and the scheduler supplies the behaviour. Everything a user sees (`spawn()`,
+`await()`, timers, channels) is ordinary code built on top of that seam.
+
+A non-blocking `sleep()`, for instance, is a handful of lines: it remembers the running coroutine,
+arms a timer on PHP's built-in Poll API to wake it after the delay, and yields, so the thread runs
+other coroutines instead of blocking:
+
+```php
+function sleep(float $seconds): void
+{
+    $coroutine = currentCoroutine();                       // the coroutine now running
+    Poll::addTimer($seconds, static fn () =>               // PHP's built-in Poll (reactor) API
+        resume($coroutine));                               // wake it when the timer fires
+    Fiber::suspend();                                      // yield; others run meanwhile
+}
+```
+
+`Poll` is PHP's built-in event/reactor API; `currentCoroutine()` and `resume()` are the
+scheduler's user-facing helpers. The RFC standardises only the hooks underneath, not this surface.
+
+The PHP core keeps track of **which coroutine is currently running**. It learns it from the
+scheduler: `onSuspend()` returns the coroutine object it switched to, and the core records that as
+the current coroutine. The scheduler reads it back through the `currentCoroutine` closure it was
+handed at `onLaunch()`. How the
+coroutine is then exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`)
+is **not part of this RFC**: like the coroutine object itself, it belongs to the scheduler's API.
+
+The same split applies to **microtasks**: the one-shot callback queue is owned by the scheduler,
+not the engine. `defer()` only forwards the callable to `onDefer()`; storage, draining, and exact
+semantics are the scheduler's policy.
+
+### Hook specification
 
 #### `onLaunch(Closure $createContinuation, Closure $currentCoroutine): ?object`
 
 Called once when the scheduler starts: for a C scheduler just before the script runs, for a PHP
 scheduler at registration (script code is already running). The engine hands a PHP scheduler its
-mandate as closures: `createContinuation(callable): Continuation` mints a continuation and
-`currentCoroutine(): ?object` returns the coroutine the engine records as running. Switching is
-done on the Continuation itself (`$continuation->switchTo()`), so it is not in the mandate. State
-initialisation belongs here; returns the coroutine now current, or null.
+privileged capabilities as closures: `createContinuation(callable): Continuation` mints a
+continuation and `currentCoroutine(): ?object` returns the coroutine the engine records as running.
+Switching is done on the Continuation itself (`$continuation->switchTo()`), so it is not one of
+them. State initialisation belongs here; returns the coroutine now current, or null.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
