@@ -18,7 +18,7 @@ future engine-level concurrency.
 
 This step was anticipated from the start. Fibers were introduced as a deliberately low-level
 primitive, on the explicit understanding that a higher-level scheduling layer would be built on
-top of them — first in userland, and in time in the engine. This RFC takes that anticipated
+top of them: first in userland, and in time in the engine. This RFC takes that anticipated
 engine-level step: it delivers on a direction the Fibers proposal already left room for, rather
 than inventing a new one.
 
@@ -241,7 +241,7 @@ arms a timer on PHP's built-in Poll API to wake it after the delay, and yields, 
 other coroutines instead of blocking. In pseudocode:
 
 ```php
-// Pseudocode — the reactor/helper names are illustrative, not part of this RFC.
+// Pseudocode: the reactor/helper names are illustrative, not part of this RFC.
 function sleep(float $seconds): void
 {
     $coroutine = currentCoroutine();                       // the coroutine now running
@@ -276,7 +276,7 @@ points. The reactor itself is outside this RFC; its C-level interface is a separ
 **1. A reactor callback wakes a coroutine.** A non-blocking operation arms an event on the reactor
 and suspends the coroutine; when the event fires, the reactor's callback hands the coroutine back
 to the scheduler (`onEnqueue`), moving it from *suspended* to *runnable*. The reactor never runs
-coroutine code — it only flips the coroutine to ready. This is exactly the `sleep()` above: its
+coroutine code; it only flips the coroutine to ready. This is exactly the `sleep()` above: its
 timer callback calls `resume($coroutine)`.
 
 **2. When idle, the scheduler blocks in the reactor.** When the run queue drains, the scheduler
@@ -284,7 +284,7 @@ does not spin: from inside `onSuspend()` it asks the reactor to block until the 
 pseudocode:
 
 ```php
-// Pseudocode — the scheduler's onSuspend, blocking in the reactor when idle.
+// Pseudocode: the scheduler's onSuspend, blocking in the reactor when idle.
 public function onSuspend(bool $fromMain, bool $isBailout): ?object
 {
     $current = null;
@@ -426,12 +426,12 @@ as a working stack, what becomes possible once PHP can switch into a concurrent 
   concurrency this is roughly **20× less memory** (54 MiB vs 1.08 GB) and, on IO-bound workloads at
   identical CPU utilisation, up to **13× higher throughput**. As applications shift toward IO-bound
   work (microservices, cloud APIs), this moves async from a niche optimisation to the default shape
-  and brings PHP to throughput parity with Node.js/Python without an architectural rewrite — with
+  and brings PHP to throughput parity with Node.js/Python without an architectural rewrite, with
   the optimal concurrency computable rather than guessed (`N ≈ 1 + T_io / T_cpu`). See the
   [concurrency-efficiency evidence](https://true-async.github.io/en/docs/evidence/concurrency-efficiency.html).
 
 - **Transparent async, minimal code changes.** Because blocking I/O becomes non-blocking
-  underneath, existing PHP code runs concurrently with only minimal adaptation, not a rewrite — the
+  underneath, existing PHP code runs concurrently with only minimal adaptation, not a rewrite; the
   framework adapters below (laravel-spawn, symfony-spawn) show how small that adaptation is.
   Hands-on experience has shown it markedly more convenient than the explicit async of Go or
   Python: there is no `async`/`await` colouring and no separate blocking vs non-blocking APIs to
@@ -459,10 +459,10 @@ as a working stack, what becomes possible once PHP can switch into a concurrent 
   running the same concurrency model on mobile/native targets, extending PHP's reach beyond the
   classic request/response host. This is also what makes PHP viable for **UI**: a responsive
   interface must never block its main loop, and the same event-driven, non-blocking coroutine model
-  is exactly what UI programming needs — so concurrency opens mobile and desktop UI to PHP, not
+  is exactly what UI programming needs, so concurrency opens mobile and desktop UI to PHP, not
   only backends.
 
-None of this is defined by this RFC — but all of it depends on the single activation contract it
+None of this is defined by this RFC, but all of it depends on the single activation contract it
 standardises.
 
 ## Future Scope
@@ -473,8 +473,8 @@ on the activation contract without changing it:
 - **Asynchronous I/O.** A standard non-blocking I/O layer (sockets, files, DNS, timers) so that the
   engine's blocking functions transparently yield when a scheduler is active.
 - **Threads.** A native threading / parallelism model that cooperates with the scheduler.
-- **Connection pooling (PDO Pool).** A shared, coroutine-aware connection pool — for example for
-  PDO — that reuses database connections across coroutines and requests.
+- **Connection pooling (PDO Pool).** A shared, coroutine-aware connection pool (for example for
+  PDO) that reuses database connections across coroutines and requests.
 
 ## Voting Choices
 
