@@ -457,7 +457,10 @@ as a working stack, what becomes possible once PHP can switch into a concurrent 
 
 - **Beyond the server.** A [native bridge](https://github.com/true-async/native-bridge) explores
   running the same concurrency model on mobile/native targets, extending PHP's reach beyond the
-  classic request/response host.
+  classic request/response host. This is also what makes PHP viable for **UI**: a responsive
+  interface must never block its main loop, and the same event-driven, non-blocking coroutine model
+  is exactly what UI programming needs — so concurrency opens mobile and desktop UI to PHP, not
+  only backends.
 
 None of this is defined by this RFC — but all of it depends on the single activation contract it
 standardises.
