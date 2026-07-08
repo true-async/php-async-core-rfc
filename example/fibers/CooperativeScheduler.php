@@ -54,8 +54,11 @@ final class CooperativeScheduler implements \Async\Scheduler
     // ------------------------------------------------------------------
 
     /** This scheduler drives fibers, so it uses none of the mandate. */
-    public function onLaunch(\Closure $createContinuation, \Closure $currentCoroutine): ?object
-    {
+    public function onLaunch(
+        \Closure $createContinuation,
+        \Closure $currentContinuation,
+        \Closure $currentCoroutine,
+    ): ?object {
         return null;
     }
 

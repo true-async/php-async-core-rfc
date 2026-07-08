@@ -1,37 +1,56 @@
 # Scheduler examples
 
-Two ways to implement the same cooperative scheduler on the Async Scheduler Hook
-API, so the two switching disciplines can be compared side by side.
+The same cooperative scheduler, written twice: on plain `Fiber`s and on the `Continuation`
+primitive. Side by side they show the two switching disciplines the
+[Async Scheduler Hook API](../scheduler_rfc.md) supports.
 
-## [`fibers/`](fibers/) — plain Fibers (asymmetric)
+Every example runs on the
+[`async-core`](https://github.com/true-async/php-src/tree/async-core) proof-of-concept build:
 
-Coroutines are `Fiber`s. The scheduler drives them with `$fiber->resume()`, and a
-coroutine yields with `Fiber::suspend()`, which returns to the resumer. Every
-switch goes `coroutine → scheduler ({main}) → coroutine`: the scheduler as a central hub, never a
-direct coroutine-to-coroutine jump. **Runs on today's engine.**
+```sh
+sapi/cli/php example/fibers/interleaving.php
+sapi/cli/php example/continuation/scheduler.php
+```
 
-- [`CooperativeScheduler.php`](fibers/CooperativeScheduler.php) — the driver
-- [`interleaving.php`](fibers/interleaving.php) — two coroutines interleave
-- [`await.php`](fibers/await.php) — awaiting a value across coroutines (a Future)
-- [`nested.php`](fibers/nested.php) — a coroutine spawns a coroutine
-- [`fiber_switch_limit.php`](fibers/fiber_switch_limit.php) — the fiber stack rule
-  the scheduler-as-hub design exists to avoid
+## The two disciplines at a glance
 
-## [`continuation/`](continuation/) — Continuation (symmetric)
+|                        | [`fibers/`](fibers/)                   | [`continuation/`](continuation/)  |
+|------------------------|----------------------------------------|-----------------------------------|
+| Switch primitive       | `Fiber` (asymmetric)                   | `Continuation` (symmetric)        |
+| A yield lands in       | the resumer: always back in the hub    | wherever the scheduler points     |
+| Switches per hand-off  | two: `coroutine → scheduler → coroutine` | one: `coroutine → coroutine`    |
+| Model                  | the scheduler as a central hub         | direct jumps, no intermediary     |
 
-The same scheduler via the *additional* `Continuation` API, in the RFC's two
-layers: a `Continuation` (minted through the `createContinuation` mandate handed
-to `onLaunch`) is the switch primitive, and the scheduler wraps it into its own
-`Coroutine` class, the schedulable unit the ready queue holds. The scheduler
-switches **directly** into one with `$coroutine->continuation->switchTo()`: one
-switch, no intermediary. The main flow is normalised the same way: at its first
-yield it is captured via the `currentContinuation` mandate and becomes a
-`Coroutine` too (`isMain`), which `onSuspend()` returns as the current one.
-**Targets the RFC mandate with three closures** (the PoC bridge currently hands
-two: `currentContinuation` is pending there).
+## [`fibers/`](fibers/): the scheduler as a hub
 
-- [`scheduler.php`](continuation/scheduler.php)
+Coroutines are `Fiber`s. The scheduler drives them with `$fiber->resume()`, and a coroutine
+yields with `Fiber::suspend()`, which always returns to the resumer. Every hand-off therefore
+routes through the scheduler.
 
-See the RFC's *Design rationale* for why `Continuation` halves the switches on the
-hot path while staying Xdebug-compatible (it is backed by the engine's own fiber
-context).
+- [`CooperativeScheduler.php`](fibers/CooperativeScheduler.php): the driver all fiber examples share
+- [`interleaving.php`](fibers/interleaving.php): two coroutines interleave
+- [`await.php`](fibers/await.php): awaiting a value across coroutines (a Future)
+- [`nested.php`](fibers/nested.php): a coroutine spawns a coroutine
+- [`fiber_switch_limit.php`](fibers/fiber_switch_limit.php): the fiber stack rule the hub
+  design exists to avoid
+
+## [`continuation/`](continuation/): direct symmetric switching
+
+The same scheduler in the RFC's two layers:
+
+- a **`Continuation`**, minted through the `createContinuation` mandate handed to `onLaunch()`,
+  is the low-level switch primitive;
+- a **`Coroutine`**, the scheduler's own class, wraps its Continuation and is what the ready
+  queue holds; switching is a direct jump: `$coroutine->continuation->switchTo()`.
+
+The main flow gets the same treatment: at its first yield it is captured through the
+`currentContinuation` mandate and becomes a `Coroutine` too (`isMain`), which `onSuspend()`
+returns as the current one. This is the normalisation the RFC describes in
+"The main flow is a coroutine too".
+
+- [`scheduler.php`](continuation/scheduler.php): the full scheduler, with working microtasks,
+  contexts and main normalisation
+
+Why a second discipline at all? `Continuation` halves the switches on hot paths while staying
+Xdebug-compatible (it is backed by the engine's own fiber context); see the RFC's
+*Design rationale*.
