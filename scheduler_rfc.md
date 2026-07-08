@@ -416,9 +416,10 @@ Next minor PHP 8.x.
 
 ## Impact on the ecosystem and prospects
 
-This RFC standardises only the activation seam, but that seam is what an entire concurrency
-ecosystem builds on. The [TrueAsync project](https://github.com/true-async) already demonstrates,
-as a working stack, what becomes possible once PHP can switch into a concurrent mode.
+This RFC opens a window onto a wide range of new possibilities. It standardises only the
+activation seam, yet that seam is what an entire concurrency ecosystem is built on: the
+[TrueAsync project](https://github.com/true-async) already demonstrates, as a working stack, what
+becomes possible once PHP can switch into a concurrent mode.
 
 - **Efficiency.** The gain is structural, not something TrueAsync invents: a coroutine (thread-pool)
   model is far lighter than PHP's traditional process-per-request model, because thousands of
