@@ -456,6 +456,17 @@ in production, what becomes possible once PHP can switch into a concurrent mode.
 None of this is defined by this RFC — but all of it depends on the single activation contract it
 standardises.
 
+## Future Scope
+
+This core is deliberately minimal. It is the foundation for a series of follow-up RFCs that build
+on the activation contract without changing it:
+
+- **Asynchronous I/O.** A standard non-blocking I/O layer (sockets, files, DNS, timers) so that the
+  engine's blocking functions transparently yield when a scheduler is active.
+- **Threads.** A native threading / parallelism model that cooperates with the scheduler.
+- **Connection pooling (PDO Pool).** A shared, coroutine-aware connection pool — for example for
+  PDO — that reuses database connections across coroutines and requests.
+
 ## Voting Choices
 
 Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
