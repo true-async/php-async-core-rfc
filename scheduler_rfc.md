@@ -19,10 +19,13 @@ future engine-level concurrency.
 **The purpose of this RFC is to give PHP the ability to activate a concurrent execution mode.**
 The proposal draws on the implementation experience of the
 [TrueAsync project](https://github.com/true-async), a complete concurrency stack for PHP
-(scheduler, libuv reactor, thread pool). It introduces a universal interface: coroutines become
-a native engine concept, and the component that drives them, the scheduler, becomes pluggable.
-A C extension or a PHP library registers a set of hooks through a single call, and from that
-point on PHP operates concurrently.
+(scheduler, libuv reactor, thread pool). TrueAsync demonstrated that PHP can be moved to
+asynchronous execution *in full*: every blocking I/O function (file and socket operations, DNS,
+streams, `sleep()`, …) becomes non-blocking transparently, without any change to existing code,
+so a coroutine that would block instead yields and lets others run. It introduces a universal
+interface: coroutines become a native engine concept, and the component that drives them, the
+scheduler, becomes pluggable. A C extension or a PHP library registers a set of hooks through a
+single call, and from that point on PHP operates concurrently.
 
 ```php
 // MyScheduler implements Async\Scheduler.
