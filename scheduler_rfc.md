@@ -203,11 +203,6 @@ final class SchedulerHook
 }
 ```
 
-The hook set is not versioned separately: it evolves together with the standard PHP module API
-(`ZEND_MODULE_API_NO`), so there is no independent async/scheduler ABI number to maintain. Future
-PHP versions may append hooks, and a scheduler built against an earlier module API remains
-functional.
-
 The division of labour is strict: the hooks decide *which* coroutine runs next (policy), while
 the engine performs the switch (mechanism). A scheduler drives its own coroutines by switching
 into their Continuation (`$continuation->switchTo()`), and adopted fibers (see `onFiber`) through
