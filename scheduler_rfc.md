@@ -564,8 +564,8 @@ is read and written through the operations below. Whether a context is inherited
 chains is the scheduler's policy, not part of this contract.
 
 The two stores are separate for safety, not convenience. Internal-context values are raw C data
-(the worked example below stores a bare pointer), addressed by numeric keys that PHP code cannot
-even name. If C-extension state lived in the userland context, ordinary PHP code could reach it
+(the worked examples in [context_examples.md](context_examples.md) store bare pointers),
+addressed by numeric keys that PHP code cannot even name. If C-extension state lived in the userland context, ordinary PHP code could reach it
 through the same context operations it uses for its own keys: overwrite a pointer, unset an
 entry whose memory C code still owns, and thereby corrupt C state or silently change core
 behaviour. The internal context is therefore structurally inaccessible from PHP; the boundary is
