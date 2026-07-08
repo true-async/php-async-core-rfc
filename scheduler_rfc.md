@@ -16,6 +16,12 @@ framework maintains its own event loop, its own coroutine abstraction and its ow
 These implementations are mutually incompatible, and none of them can interoperate with any
 future engine-level concurrency.
 
+This step was anticipated from the start. Fibers were introduced as a deliberately low-level
+primitive, on the explicit understanding that a higher-level scheduling layer would be built on
+top of them — first in userland, and in time in the engine. This RFC takes that anticipated
+engine-level step: it delivers on a direction the Fibers proposal already left room for, rather
+than inventing a new one.
+
 **The purpose of this RFC is to give PHP the ability to activate a concurrent execution mode.**
 The proposal draws on the implementation experience of the
 [TrueAsync project](https://github.com/true-async), a complete concurrency stack for PHP
