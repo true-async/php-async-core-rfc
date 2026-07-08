@@ -418,22 +418,24 @@ Next minor PHP 8.x.
 
 This RFC standardises only the activation seam, but that seam is what an entire concurrency
 ecosystem builds on. The [TrueAsync project](https://github.com/true-async) already demonstrates,
-in production, what becomes possible once PHP can switch into a concurrent mode.
+as a working stack, what becomes possible once PHP can switch into a concurrent mode.
 
-- **Efficiency.** With transparent async I/O a coroutine costs a fraction of a thread: TrueAsync
-  measures roughly **20× less memory** for the same concurrency (54 MiB vs 1.08 GB) and up to
-  **13× higher throughput** on IO-bound workloads at identical CPU utilisation. As applications
-  shift toward IO-bound work (microservices, cloud APIs), this moves async from a niche
-  optimisation to the default shape and brings PHP to throughput parity with Node.js/Python
-  without an architectural rewrite — with the optimal concurrency computable rather than guessed
-  (`N ≈ 1 + T_io / T_cpu`). See the
+- **Efficiency.** The gain is structural, not something TrueAsync invents: a coroutine (thread-pool)
+  model is far lighter than PHP's traditional process-per-request model, because thousands of
+  coroutines share one process instead of forking a process per concurrent request. For the same
+  concurrency this is roughly **20× less memory** (54 MiB vs 1.08 GB) and, on IO-bound workloads at
+  identical CPU utilisation, up to **13× higher throughput**. As applications shift toward IO-bound
+  work (microservices, cloud APIs), this moves async from a niche optimisation to the default shape
+  and brings PHP to throughput parity with Node.js/Python without an architectural rewrite — with
+  the optimal concurrency computable rather than guessed (`N ≈ 1 + T_io / T_cpu`). See the
   [concurrency-efficiency evidence](https://true-async.github.io/en/docs/evidence/concurrency-efficiency.html).
 
-- **Transparent async, no code changes.** Because blocking I/O becomes non-blocking underneath,
-  existing PHP code runs concurrently unchanged: a call that would block yields instead. Field use
-  of transparent asynchrony has proved markedly more convenient than the explicit async of Go or
-  Python — there is no `async`/`await` colouring and no separate blocking vs non-blocking APIs to
-  learn; ordinary sequential code simply scales.
+- **Transparent async, minimal code changes.** Because blocking I/O becomes non-blocking
+  underneath, existing PHP code runs concurrently with only minimal adaptation, not a rewrite — the
+  framework adapters below (laravel-spawn, symfony-spawn) show how small that adaptation is.
+  Hands-on experience has shown it markedly more convenient than the explicit async of Go or
+  Python: there is no `async`/`await` colouring and no separate blocking vs non-blocking APIs to
+  learn; ordinary sequential code scales with light touch-ups.
 
 - **Frameworks.** Laravel and Symfony gain concurrency through thin adapters rather than forks:
   [laravel-spawn](https://github.com/YanGusik/laravel-spawn),
