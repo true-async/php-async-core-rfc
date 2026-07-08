@@ -12,9 +12,12 @@ A scheduler registers once per process, either from C
 (`Async\SchedulerHook::register()`). A second registration fails; from PHP it
 throws an Error. `Async\SchedulerHook::getModule()` reports the active driver.
 
-For a PHP-registered scheduler the `launch` hook runs synchronously inside
-`register()`, because the engine's own launch point has already passed by the
-time userland code executes.
+`Async\SchedulerHook::register()` takes a factory: it receives the mandate
+(createContinuation, currentContinuation, currentCoroutine) and returns the
+scheduler, constructed already holding it. The factory runs synchronously
+inside `register()`, because the engine's own launch point has already passed
+by the time userland code executes; the `launch` slot itself is therefore not
+bridged to PHP and stays a C-scheduler concern.
 
 ## Engine Invocation Points
 
@@ -58,7 +61,7 @@ the resumer, which on the coroutine path is the scheduler's own resume call.
 |-------|-----------------|-------|
 | MINIT | slots filled via `zend_async_scheduler_register()` | C scheduler |
 | Before script code (#1/#5) | `READY → ACTIVE` | core → `launch` |
-| During the script | PHP registration also possible: `register()` runs `launch` and activates immediately | bridge |
+| During the script | PHP registration also possible: `register()` runs the scheduler factory and activates immediately | bridge |
 | Script runs | fibers adopted via `intercept_fiber`; operations route through the hooks | scheduler |
 | After main (#2/#3/#5) | remaining coroutines drain | core → `suspend(fromMain: true)` |
 | Destructors done (#4) | final drain, then `ACTIVE → OFF` | core |

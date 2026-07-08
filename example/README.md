@@ -38,8 +38,8 @@ routes through the scheduler.
 
 The same scheduler in the RFC's two layers:
 
-- a **`Continuation`**, minted through the `createContinuation` mandate handed to `onLaunch()`,
-  is the low-level switch primitive;
+- a **`Continuation`**, minted through the `createContinuation` mandate handed to the
+  scheduler's factory at registration, is the low-level switch primitive;
 - a **`Coroutine`**, the scheduler's own class, wraps its Continuation and is what the ready
   queue holds; switching is a direct jump: `$coroutine->continuation->switchTo()`.
 

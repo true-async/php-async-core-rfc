@@ -14,7 +14,7 @@
 require __DIR__ . '/CooperativeScheduler.php';
 
 // Activate concurrency by registering a scheduler instance.
-Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
+Async\SchedulerHook::register('cooperative', fn () => new CooperativeScheduler());
 
 function worker(string $name, int $steps): void
 {

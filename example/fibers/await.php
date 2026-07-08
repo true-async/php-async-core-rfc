@@ -15,7 +15,7 @@
 
 require __DIR__ . '/CooperativeScheduler.php';
 
-Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
+Async\SchedulerHook::register('cooperative', fn () => new CooperativeScheduler());
 
 /**
  * A one-slot future: a coroutine awaits it, another resolves it. The waiting

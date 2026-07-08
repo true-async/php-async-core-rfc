@@ -10,7 +10,7 @@
  * not expose that inside a running coroutine): this scheduler keeps a
  * Fiber -> coroutine map and offers currentCoroutine() built on it.
  *
- *     Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
+ *     Async\SchedulerHook::register('cooperative', fn () => new CooperativeScheduler());
  */
 final class CooperativeScheduler implements \Async\Scheduler
 {
@@ -52,15 +52,6 @@ final class CooperativeScheduler implements \Async\Scheduler
     // ------------------------------------------------------------------
     // Async\Scheduler hooks
     // ------------------------------------------------------------------
-
-    /** This scheduler drives fibers, so it uses none of the mandate. */
-    public function onLaunch(
-        \Closure $createContinuation,
-        \Closure $currentContinuation,
-        \Closure $currentCoroutine,
-    ): ?object {
-        return null;
-    }
 
     public function onShutdown(): bool
     {

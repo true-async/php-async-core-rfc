@@ -14,7 +14,7 @@
 
 require __DIR__ . '/CooperativeScheduler.php';
 
-Async\SchedulerHook::register('cooperative', new CooperativeScheduler());
+Async\SchedulerHook::register('cooperative', fn () => new CooperativeScheduler());
 
 function child(string $name): void
 {

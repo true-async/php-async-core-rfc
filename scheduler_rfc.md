@@ -30,11 +30,14 @@ streams, `sleep()`, …) becomes non-blocking transparently, without any change 
 a coroutine that would block yields instead and lets others run. This RFC extracts the interface
 that experience converged on. The engine learns to speak in coroutines, and the component that
 drives them, the scheduler, becomes pluggable. A C extension or a PHP library hands the engine
-a scheduler object in a single call, and from that point on PHP operates concurrently.
+a scheduler factory in a single call, and from that point on PHP operates concurrently.
 
 ```php
-// MyScheduler implements Async\Scheduler.
-Async\SchedulerHook::register('my-scheduler', new MyScheduler());
+// The factory receives the scheduler's capabilities and returns the scheduler,
+// constructed in a valid state. MyScheduler implements Async\Scheduler.
+Async\SchedulerHook::register('my-scheduler',
+    fn (callable $createContinuation, callable $currentContinuation, callable $currentCoroutine)
+        => new MyScheduler($createContinuation, $currentContinuation, $currentCoroutine));
 ```
 
 ## Scope: what this RFC deliberately does not define
@@ -121,11 +124,15 @@ final class Continuation
 }
 
 /**
- * A scheduler implements this interface and hands an instance to
- * SchedulerHook::register(). The `on*` methods are *event callbacks*: the engine
- * decides when to invoke them, the hooks decide which coroutine runs next, and
- * the low-level stack switch itself is always performed by the engine's fiber
- * machinery (behind Continuation::switchTo() and the Fiber API).
+ * A scheduler implements this interface; the factory handed to
+ * SchedulerHook::register() returns an instance of it. The `on*` methods are
+ * *event callbacks*: the engine decides when to invoke them, the hooks decide
+ * which coroutine runs next, and the low-level stack switch itself is always
+ * performed by the engine's fiber machinery (behind Continuation::switchTo()
+ * and the Fiber API).
+ *
+ * The engine learns the current coroutine in exactly one way: the return
+ * value of onSuspend(). It never chooses one on its own.
  *
  * Two layers. A `Continuation` is the low-level symmetric-switch primitive,
  * minted via createContinuation and entered with its own switchTo(). A
@@ -139,22 +146,6 @@ final class Continuation
  */
 interface Scheduler
 {
-    /**
-     * The scheduler starts. The engine hands a PHP scheduler its privileged
-     * capabilities as plain closures (a C scheduler reaches the primitives
-     * directly and receives none). Because they arrive only here, only the
-     * scheduler holds them: no other code can mint or capture continuations, or
-     * read the current coroutine. Switching is not one of these closures: it is
-     * done either through the plain Fiber interface (for an adopted fiber) or on
-     * the Continuation itself (for the scheduler's own coroutines). Returns the
-     * coroutine now current (or null); the engine records it, same as onSuspend().
-     */
-    public function onLaunch(
-        \Closure $createContinuation,   // createContinuation(callable $entry): Continuation
-        \Closure $currentContinuation,  // currentContinuation(): Continuation
-        \Closure $currentCoroutine,     // currentCoroutine(): ?object
-    ): ?object;
-
     /** A graceful shutdown has been requested. */
     public function onShutdown(): bool;
 
@@ -176,10 +167,10 @@ interface Scheduler
     /**
      * The current flow yields. Pick who runs next and switch into it (with the
      * Continuation's switchTo). Return the coroutine now running; the engine
-     * records it as the current coroutine, exactly as it does for onLaunch();
-     * it never chooses one on its own. `$fromMain` marks the end-of-main
-     * handover; `$isBailout` an abnormal termination of the main flow (a fatal
-     * error): the last opportunity to clean up resources.
+     * records it as the current coroutine (the single way it ever learns it).
+     * `$fromMain` marks the end-of-main handover; `$isBailout` an abnormal
+     * termination of the main flow (a fatal error): the last opportunity to
+     * clean up resources.
      */
     public function onSuspend(bool $fromMain, bool $isBailout): ?object;
 
@@ -210,12 +201,26 @@ interface Scheduler
 final class SchedulerHook
 {
     /**
-     * Registers a scheduler and activates the concurrent mode. A scheduler is
-     * registered exactly once per process: if one is already registered,
-     * whether by a C extension or by an earlier call, this method throws an
-     * Error.
+     * Registers a scheduler and activates the concurrent mode. The factory
+     * receives the scheduler's privileged capabilities and returns the
+     * scheduler, constructed already holding them:
+     *
+     *     fn (callable $createContinuation,   // createContinuation(callable $entry): Continuation
+     *         callable $currentContinuation,  // currentContinuation(): Continuation
+     *         callable $currentCoroutine,     // currentCoroutine(): ?object
+     *     ): Async\Scheduler
+     *
+     * Because the capabilities are handed only to the factory, only the
+     * scheduler holds them: no other code can mint or capture continuations,
+     * or read the current coroutine. Switching is not one of them: it is done
+     * either through the plain Fiber interface (for an adopted fiber) or on
+     * the Continuation itself (for the scheduler's own coroutines).
+     *
+     * A scheduler is registered exactly once per process: if one is already
+     * registered, whether by a C extension or by an earlier call, this method
+     * throws an Error.
      */
-    public static function register(string $module, Scheduler $scheduler): bool {}
+    public static function register(string $module, callable $factory): bool {}
 
     /** The module name of the registered scheduler, or null when none. */
     public static function getModule(): ?string {}
@@ -236,9 +241,14 @@ final class SchedulerHook
   optional companion interfaces (the way session handlers gained
   `SessionUpdateTimestampHandlerInterface`) without breaking implementations.
 
-- **Privileged operations as hidden closures.** `createContinuation`, `currentContinuation`
-  and `currentCoroutine` are handed to `onLaunch()` once, only to the scheduler: a
-  capability, not a global function or static method that any code could call.
+- **A factory, not a ready instance.** `register()` takes a callable that receives the
+  capabilities and returns the scheduler. The scheduler is therefore constructed already
+  holding its mandate: no half-initialised object, no nullable capability properties, no
+  window in which the scheduler exists but cannot act.
+
+- **Privileged operations as hidden capabilities.** `createContinuation`, `currentContinuation`
+  and `currentCoroutine` are handed to the factory once, only to the scheduler: a capability,
+  not a global function or static method that any code could call.
 
 - **Continuation vs Fiber.** A `Fiber` is asymmetric (yields only to its resumer),
   so A → B costs two switches through an intermediary. A `Continuation` is
@@ -274,10 +284,11 @@ the scheduler's user-facing helpers (`suspend()` routes through the `onSuspend` 
 standardises only the hooks underneath, not this surface.
 
 The PHP core keeps track of **which coroutine is currently running**, but never chooses it: the
-scheduler reports it through the return values of `onLaunch()` and `onSuspend()`, and reads it
-back through the `currentCoroutine` closure it was handed at `onLaunch()`. How the coroutine is
-then exposed to userland (a `current()` accessor, a coroutine class, `spawn()`/`await()`) is
-**not part of this RFC**: like the coroutine object itself, it belongs to the scheduler's API.
+scheduler reports it through the return value of `onSuspend()` (the single way it is ever set),
+and reads it back through the `currentCoroutine` capability handed to its factory. How the
+coroutine is then exposed to userland (a `current()` accessor, a coroutine class,
+`spawn()`/`await()`) is **not part of this RFC**: like the coroutine object itself, it belongs
+to the scheduler's API.
 
 The same split applies to **microtasks**: the one-shot callback queue is owned by the scheduler,
 not the engine. `defer()` only forwards the callable to `onDefer()`; storage, draining, and exact
@@ -385,25 +396,17 @@ final class MiniScheduler implements Async\Scheduler
     private \SplQueue $microtasks;          // onDefer() queue, drained once per tick
     private \SplObjectStorage $waitInfo;    // coroutine => what it is waiting for
     private ?MyCoroutine $main = null;      // the adopted main flow
-    private \Closure $createContinuation;   // capability received at onLaunch()
-    private \Closure $currentContinuation;  // capability received at onLaunch()
-    private \Closure $currentCoroutine;     // capability received at onLaunch()
 
-    public function onLaunch(
-        \Closure $createContinuation,
-        \Closure $currentContinuation,
-        \Closure $currentCoroutine,
-    ): ?object {
-        // The capabilities arrive exactly once: from here on, only the
-        // scheduler can mint or capture continuations, or read the current
-        // coroutine.
-        $this->createContinuation = $createContinuation;
-        $this->currentContinuation = $currentContinuation;
-        $this->currentCoroutine = $currentCoroutine;
+    // The capabilities arrive through the constructor, so the scheduler is
+    // created in a valid state and only the scheduler holds them.
+    public function __construct(
+        private readonly \Closure $createContinuation,   // createContinuation(callable): Continuation
+        private readonly \Closure $currentContinuation,  // currentContinuation(): Continuation
+        private readonly \Closure $currentCoroutine,     // currentCoroutine(): ?object
+    ) {
         $this->ready = new \SplQueue();
         $this->microtasks = new \SplQueue();
         $this->waitInfo = new \SplObjectStorage();
-        return null;                                 // nothing is running yet
     }
 
     // spawn() is the scheduler's own API, not part of the RFC: wrap the entry
@@ -485,27 +488,34 @@ final class MiniScheduler implements Async\Scheduler
     public function contextSet(object $context, mixed $key, mixed $value): bool { /* ... */ }
     public function contextUnset(object $context, mixed $key): bool { /* ... */ }
 }
+
+Async\SchedulerHook::register('mini',
+    fn (callable $create, callable $capture, callable $current)
+        => new MiniScheduler($create, $capture, $current));
 ```
 
 Three things are worth noticing. The engine never sees a queue, a policy or a coroutine class:
-it only fires the hooks and records what `onLaunch()`/`onSuspend()` return. The user-facing API
-(`spawn()` here) is ordinary code the scheduler adds on top. And replacing the naive loop with
-the reactor version from the previous section turns this sketch into a real event-driven
-scheduler without changing any signature.
+it only fires the hooks and records what `onSuspend()` returns. The user-facing API (`spawn()`
+here) is ordinary code the scheduler adds on top. And replacing the naive loop with the reactor
+version from the previous section turns this sketch into a real event-driven scheduler without
+changing any signature.
 
 ### Hook specification
 
-#### `onLaunch(Closure $createContinuation, Closure $currentContinuation, Closure $currentCoroutine): ?object`
+#### `SchedulerHook::register(string $module, callable $factory): bool`
 
-Called once when the scheduler starts: for a C scheduler just before the script runs, for a PHP
-scheduler at registration (script code is already running). The engine hands a PHP scheduler its
-privileged capabilities as closures: `createContinuation(callable): Continuation` mints a
+Not a hook but the entry point of the whole contract, so it is specified first. The factory runs
+once, at the moment the scheduler starts: for a C scheduler the launch point lies just before
+the script runs; for a PHP scheduler the factory runs synchronously inside `register()`, because
+the engine's own launch point has already passed. The factory receives the scheduler's
+privileged capabilities as callables: `createContinuation(callable): Continuation` mints a
 continuation, `currentContinuation(): Continuation` captures the context that is currently
 running (how the main flow is adopted, see above), and `currentCoroutine(): ?object` returns the
 coroutine the engine records as running. Switching is not one of them: it is done either through
 the plain Fiber interface (for an adopted fiber) or on the Continuation itself
-(`$continuation->switchTo()`, for the scheduler's own coroutines). State initialisation belongs
-here; returns the coroutine now current, or null.
+(`$continuation->switchTo()`, for the scheduler's own coroutines). The factory returns the
+scheduler, constructed already holding the capabilities; state initialisation belongs in its
+constructor.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
@@ -732,9 +742,9 @@ to a configurable concurrency limit over one shared position.
 Once registered, the scheduler is **always active**: there is no lazy initialisation and no
 implicit start on the first asynchronous call.
 
-- **Launch.** A C-registered scheduler launches immediately before the script code runs. A
-  PHP-registered one launches inside `register()` itself, because the engine's own launch point
-  has already passed by the time userland code executes.
+- **Launch.** A C-registered scheduler launches immediately before the script code runs. For a
+  PHP-registered one the launch moment is the factory call inside `register()` itself, because
+  the engine's own launch point has already passed by the time userland code executes.
 - **End of main.** When the main script ends, the engine hands control to the scheduler with
   `onSuspend(fromMain: true)`. After a normal completion the scheduler drains the remaining
   coroutines to completion and returns the *main* coroutine (the main flow adopted at its first

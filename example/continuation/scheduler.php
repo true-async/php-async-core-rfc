@@ -17,8 +17,9 @@
  * current, not null.
  *
  * The mandate (createContinuation + currentContinuation + currentCoroutine)
- * arrives only in onLaunch(), so nobody but the scheduler can mint or capture
- * continuations.
+ * arrives through the factory handed to register(), so the scheduler is
+ * constructed already holding its capabilities and nobody but the scheduler
+ * can mint or capture continuations.
  */
 
 /** The scheduler's own coroutine: wraps the Continuation that backs it. */
@@ -56,28 +57,18 @@ final class ContinuationScheduler implements \Async\Scheduler
     private \SplQueue $microtasks;         // onDefer() queue, drained once per tick
     private ?Coroutine $main = null;       // the adopted main flow
 
-    /** The mandate: held only by the scheduler. */
-    private \Closure $createContinuation;  // createContinuation(callable $entry): Continuation
-    private \Closure $currentContinuation; // currentContinuation(): Continuation
-    private \Closure $currentCoroutine;    // currentCoroutine(): ?object
-
-    public function __construct()
-    {
+    /**
+     * The mandate arrives through the constructor: the scheduler is created in
+     * a valid state, already holding its capabilities.
+     */
+    public function __construct(
+        private readonly \Closure $createContinuation,  // createContinuation(callable $entry): Continuation
+        private readonly \Closure $currentContinuation, // currentContinuation(): Continuation
+        private readonly \Closure $currentCoroutine,    // currentCoroutine(): ?object
+    ) {
         self::$instance = $this;
         $this->ready = new \SplQueue();
         $this->microtasks = new \SplQueue();
-    }
-
-    /** The engine hands the mandate once, at start. */
-    public function onLaunch(
-        \Closure $createContinuation,
-        \Closure $currentContinuation,
-        \Closure $currentCoroutine,
-    ): ?object {
-        $this->createContinuation = $createContinuation;
-        $this->currentContinuation = $currentContinuation;
-        $this->currentCoroutine = $currentCoroutine;
-        return null;
     }
 
     /** Spawn: mint a Continuation and wrap it into the scheduler's Coroutine. */
@@ -193,7 +184,9 @@ function spawn(callable $task): Coroutine
 
 // --- demo ----------------------------------------------------------------------
 
-\Async\SchedulerHook::register('continuation', new ContinuationScheduler());
+\Async\SchedulerHook::register('continuation',
+    fn (callable $create, callable $capture, callable $current)
+        => new ContinuationScheduler($create, $capture, $current));
 
 function worker(string $name, int $steps): void
 {
