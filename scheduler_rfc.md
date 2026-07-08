@@ -80,6 +80,13 @@ A coroutine is a lightweight unit of execution: a callable with a defined lifecy
 
 > created → queued → running → suspended → finished
 
+A coroutine sits at a *higher level of abstraction* than a `Fiber` or a `Continuation`. Those are
+the low-level primitives that merely save and restore an execution context; a coroutine is the
+schedulable unit the scheduler builds on top of one of them, adding the lifecycle above, a result
+or unhandled exception, cancellation, and its execution-flow context. The engine and the hooks
+speak in coroutines; which primitive backs a given coroutine (a fiber or a continuation) is the
+scheduler's implementation choice.
+
 Two orthogonal attributes may additionally apply: *cancelled* (cancellation has been requested)
 and *main* (the coroutine that wraps the top-level script). Each coroutine records its
 completion result or unhandled exception, the source location at which it was spawned, and, while
