@@ -55,6 +55,46 @@ each destructor invoked during the GC phase.
 `Fiber::suspend()` needs no coroutine-mode changes: the switch goes back to
 the resumer, which on the coroutine path is the scheduler's own resume call.
 
+## Error Channel
+
+The PHP hooks report failure only by throwing; where a hook returns `bool`,
+the value is data (`onEnqueue`: accepted or not, `contextUnset`: key existed).
+The C slots stay `bool`: C has no exceptions, and a reactor callback needs a
+cheap answer without stack unwinding. The registration bridge maps between
+the two: a PHP hook that throws makes the slot report failure with the
+exception left pending in `EG(exception)`. A slot failure *without* a pending
+exception is a quiet rejection (enqueue during shutdown); the engine converts
+it into a thrown `Error` at PHP-visible boundaries (`Fiber::resume()` on an
+adopted fiber) and leaves C callers to observe the `false`, dispose of any
+error they were delivering, and treat the coroutine as never scheduled.
+
+## Coroutine Switch Handlers (C-only)
+
+A per-coroutine vector of C callbacks fired when the coroutine is entered,
+left, or finished (`zend_coroutine_add_switch_handler()`,
+`ZEND_COROUTINE_ENTER/LEAVE/FINISH`), plus a process-wide list applied to the
+main coroutine at its adoption
+(`zend_async_add_main_coroutine_start_handler()`). This seam is **not part of
+the PHP interface** and is not bridged: for a PHP scheduler the same needs are
+covered by the microtask queue (the watchdog/concurrent-iterator pattern) and
+the internal context (per-coroutine state, migrated lazily). The C vector
+exists for engine subsystems and extensions that must observe every switch
+(profilers, debuggers, the shutdown-destructor watchdogs in the full
+TrueAsync tree).
+
+## Fork Guard
+
+`fork()` cannot preserve a live scheduler: parked coroutines, watcher fds and
+worker threads do not survive it. `pcntl_fork()` asks the engine with
+`ZEND_ASYNC_BEFORE_FORK()`; while the Async state is active and no fork hooks
+are registered, the answer is a thrown `Error`, unconditionally. A C extension
+that can survive a fork registers the pair
+`zend_async_fork_register(before_fork, after_fork_child)`: `before_fork()`
+runs in the parent and decides whether this fork is allowed (the reference
+scheduler permits it only when the main coroutine is the sole live one;
+it throws and returns `false` otherwise), `after_fork_child()` reinitialises
+the reactor in the child. With the Async state off, forking is unrestricted.
+
 ## Resulting Request Lifecycle
 
 | Phase | State transition | Actor |

@@ -1,7 +1,7 @@
 # PHP RFC: Async Scheduler Hook API
 
-- **Version:** 0.1
-- **Date:** 2026-07-02
+- **Version:** 0.2
+- **Date:** 2026-07-09
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
 - **Implementation:** https://github.com/php/php-src/pull/22561
@@ -119,8 +119,14 @@ namespace Async;
  */
 final class Continuation
 {
-    /** Switch control into this continuation, optionally sending $value. */
-    public function switchTo(mixed $value = null): mixed {}
+    /**
+     * Switch control into this continuation. $value is delivered as the return
+     * value of the switchTo() call the target is suspended in; a non-null
+     * $error is thrown from that call instead (passing both is a ValueError).
+     * The full transfer contract, including the first entry and the finished
+     * continuation, is specified in "Exceptions and value transfer".
+     */
+    public function switchTo(mixed $value = null, ?\Throwable $error = null): mixed {}
 }
 
 /**
@@ -141,13 +147,16 @@ final class Continuation
  * enqueue/suspend/context and the current-coroutine accessor all speak in
  * coroutines, not continuations.
  *
- * Hooks that return `bool` report acceptance: `true` means the event was
- * handled, `false` (or a thrown exception) that it was not.
+ * Failures are reported by exceptions, never by return values. Where a hook
+ * does return `bool`, the value is data, not a status: onEnqueue() reports
+ * whether the coroutine was accepted (false during shutdown is a normal
+ * state), contextUnset() whether the key existed. Every other hook returns
+ * void; a hook that cannot do its job throws (see "Exceptions").
  */
 interface Scheduler
 {
     /** A graceful shutdown has been requested. */
-    public function onShutdown(): bool;
+    public function onShutdown(): void;
 
     /**
      * A foreign Fiber (created by application/third-party code, e.g.
@@ -159,8 +168,10 @@ interface Scheduler
     /**
      * Make a coroutine runnable: the single "schedule it" operation (a fresh
      * enqueue and a resume are the same thing). A non-null `$error` is raised at
-     * the coroutine's suspension point; that is how cancellation and IO/timeout
-     * failures reach waiting code.
+     * the coroutine's suspension point (the scheduler delivers it through the
+     * $error parameter of switchTo()); that is how cancellation and IO/timeout
+     * failures reach waiting code. Returns false when the coroutine was not
+     * accepted (the scheduler is shutting down): a quiet rejection, not an error.
      */
     public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool;
 
@@ -175,14 +186,14 @@ interface Scheduler
     public function onSuspend(bool $fromMain, bool $isBailout): ?object;
 
     /** Queue a one-shot microtask on the scheduler's queue. */
-    public function onDefer(callable $task): bool;
+    public function onDefer(callable $task): void;
 
     /**
      * Record a human-readable description of what `$coroutine` is currently
      * waiting for (e.g. "socket #7 (readable)"), attached by whoever suspended it.
      * Used by introspection tooling and deadlock reports.
      */
-    public function onWaitInfo(object $coroutine, string $info): bool;
+    public function onWaitInfo(object $coroutine, string $info): void;
 
     // --- Coroutine context (queries/providers, not events, so no on-prefix) ---
 
@@ -193,7 +204,9 @@ interface Scheduler
     public function getInternalContext(object $coroutine): object;
 
     public function contextFind(object $context, mixed $key): mixed;
-    public function contextSet(object $context, mixed $key, mixed $value): bool;
+    public function contextSet(object $context, mixed $key, mixed $value): void;
+
+    /** Returns whether the key existed (unset semantics), not success. */
     public function contextUnset(object $context, mixed $key): bool;
 }
 
@@ -218,9 +231,10 @@ final class SchedulerHook
      *
      * A scheduler is registered exactly once per process: if one is already
      * registered, whether by a C extension or by an earlier call, this method
-     * throws an Error.
+     * throws an Error. Any other failure is an Error too; the method never
+     * reports one through a return value.
      */
-    public static function register(string $module, callable $factory): bool {}
+    public static function register(string $module, callable $factory): void {}
 
     /** The module name of the registered scheduler, or null when none. */
     public static function getModule(): ?string {}
@@ -362,6 +376,48 @@ PHP engine records it as current. In particular, the end-of-main handover return
 coroutine, not null. This is how the reference implementation behaves: TrueAsync represents the
 main flow as a coroutine and reports it from the end-of-main handover.
 
+### Exceptions and value transfer
+
+`switchTo()` is both a send and a receive. One call does two things: it hands control away
+together with a value, and, when some later flow switches back, it returns the value that flow
+passed. `$value` is therefore delivered as *the return value of the `switchTo()` call the target
+is currently suspended in*. This is the symmetric analogue of the `Fiber::resume($v)` /
+"`$v` comes back from `Fiber::suspend()`" pair, with no intermediary.
+
+The `$error` parameter uses the same channel with the opposite polarity: instead of returning
+`$value` from the target's pending `switchTo()`, it throws `$error` from it. This is the
+primitive behind the `onEnqueue()` contract ("a non-null `$error` is raised at the coroutine's
+suspension point"): the scheduler delivers cancellation and IO/timeout failures by switching
+into the coroutine with the error instead of a value. Passing both a non-null `$value` and an
+`$error` is a `ValueError`: there is nowhere the value could arrive.
+
+The boundary cases complete the contract:
+
+- **First entry.** A fresh continuation has no pending `switchTo()` to deliver into: the value
+  of a first entry is ignored (the body takes its arguments from the callable handed to
+  `createContinuation`). A first entry with an `$error` does not start the body at all: the
+  continuation finishes with that exception, which then surfaces at the switch site as below.
+  This is precisely the cancellation of a coroutine that never ran.
+- **Body completion.** When the continuation's callable returns, the result is delivered through
+  the same channel: it becomes the return value of the `switchTo()` call of whoever switched
+  into the continuation last. An exception the body does not catch travels the same way, as a
+  throw: it surfaces *at the switch site*, inside the flow that performed the last `switchTo()`.
+  In practice that flow is the scheduler's `onSuspend()` loop, so a scheduler must wrap its
+  switches and record what escapes as the coroutine's unhandled exception (the attribute from
+  the Coroutines section). A bailout (fatal error) is not an exception and propagates as a
+  bailout across the switch.
+- **Finished continuation.** Switching into a continuation whose body has completed throws an
+  `Error`.
+
+Exceptions escaping a *hook* follow from where the hook was called. When userland frames sit
+beneath the hook invocation (an `onSuspend()` reached from application code, e.g. inside a
+suspending `sleep()`), the exception surfaces at that suspension point, in the flow that
+yielded: the natural reading of "the operation failed". When no userland frame exists (the
+end-of-main handover, an `onEnqueue()` fired by a reactor callback), there is no one to deliver
+to: the exception is treated as unhandled, reported, and the request is torn down. Hooks should
+therefore not let exceptions escape; a scheduler that can neither handle an event nor recover
+throws deliberately, knowing the above is the consequence.
+
 ### A minimal scheduler
 
 The hook specification below is easier to read against a concrete implementation. The following
@@ -376,6 +432,7 @@ final class MyCoroutine
 {
     public ?Async\Continuation $continuation = null;
     public ?\Throwable $pendingError = null;
+    public ?\Throwable $unhandledException = null;
     public bool $isMain = false;
     public object $context;
     public object $internal;
@@ -450,9 +507,21 @@ final class MiniScheduler implements Async\Scheduler
 
             $current = $this->ready->dequeue();
             $current->continuation ??= ($this->createContinuation)($current->body);
-            $current->continuation->switchTo();      // or drive an adopted fiber;
-        }                                            // a pendingError is thrown at the
-                                                     // suspension point inside
+
+            $error = $current->pendingError;
+            $current->pendingError = null;
+
+            try {
+                // A pending error is thrown at the suspension point inside;
+                // an adopted fiber is driven with resume()/throw() instead.
+                $current->continuation->switchTo(null, $error);
+            } catch (\Throwable $unhandled) {
+                // The body finished with an uncaught exception: it surfaces
+                // here, at the switch site. Record it on the coroutine.
+                $current->unhandledException = $unhandled;
+            }
+        }
+
         return $self;    // this frame resumes when $self runs again: record it
     }
 
@@ -462,22 +531,19 @@ final class MiniScheduler implements Async\Scheduler
         return new MyCoroutine($fiber);
     }
 
-    public function onDefer(callable $task): bool
+    public function onDefer(callable $task): void
     {
         $this->microtasks->enqueue($task);
-        return true;
     }
 
-    public function onWaitInfo(object $coroutine, string $info): bool
+    public function onWaitInfo(object $coroutine, string $info): void
     {
         $this->waitInfo[$coroutine] = $info;         // introspection, deadlock reports
-        return true;
     }
 
-    public function onShutdown(): bool
+    public function onShutdown(): void
     {
         // Policy decision: stop accepting work, then cancel or drain the rest.
-        return true;
     }
 
     // Contexts: plain per-coroutine stores; the storage strategy (arrays,
@@ -486,7 +552,7 @@ final class MiniScheduler implements Async\Scheduler
     public function getInternalContext(object $coroutine): object { return $coroutine->internal; }
 
     public function contextFind(object $context, mixed $key): mixed { /* ... */ }
-    public function contextSet(object $context, mixed $key, mixed $value): bool { /* ... */ }
+    public function contextSet(object $context, mixed $key, mixed $value): void { /* ... */ }
     public function contextUnset(object $context, mixed $key): bool { /* ... */ }
 }
 
@@ -503,7 +569,7 @@ changing any signature.
 
 ### Hook specification
 
-#### `SchedulerHook::register(string $module, callable $factory): bool`
+#### `SchedulerHook::register(string $module, callable $factory): void`
 
 Registers the scheduler by invoking its factory. It is not itself a hook, but every other hook
 depends on a scheduler having been registered, so it is specified first.
@@ -524,14 +590,21 @@ adopted fiber) or on the Continuation itself (`$continuation->switchTo()`, for t
 own coroutines).
 
 The factory returns the scheduler, already constructed with these capabilities; state
-initialisation belongs in its constructor.
+initialisation belongs in its constructor. Every failure (a second registration, a factory that
+throws or returns the wrong type, an engine-level refusal) is an `Error`; the method reports
+nothing through a return value.
 
 #### `onEnqueue(object $coroutine, ?Throwable $error = null): bool`
 
 Make a coroutine runnable and place it in the run queue. Enqueuing a fresh coroutine and resuming
 a suspended one are the same operation. A non-null `$error` is raised at the coroutine's
-suspension point, which is how cancellation and IO/timeout failures reach waiting code. `false`
-means the coroutine was not accepted (for example during shutdown).
+suspension point, which is how cancellation and IO/timeout failures reach waiting code; the
+scheduler delivers it with the `$error` parameter of `switchTo()` (see "Exceptions and value
+transfer"). `false` means the coroutine was not accepted (for example during shutdown): a quiet
+rejection, not an error. What happens next depends on the caller: at a PHP-visible boundary the
+engine converts the rejection into a thrown `Error` (e.g. `Fiber::resume()` on an adopted fiber);
+a C caller such as a reactor callback observes the `false`, disposes of the error it was
+delivering and treats the coroutine as never scheduled.
 
 #### `onSuspend(bool $fromMain, bool $isBailout): ?object`
 
@@ -570,21 +643,22 @@ for itself, returning `null` for those and a coroutine for the rest — the PHP 
 so no outside code can mark a fiber "internal". Unlike the other hooks, this one receives a real
 `Fiber` rather than a coroutine, because the fiber has not been adopted yet.
 
-#### `onDefer(callable $task): bool`
+#### `onDefer(callable $task): void`
 
 Queue a one-shot microtask; the scheduler runs it on its next tick. The PHP engine never stores tasks:
 both `SchedulerHook::defer()` and C-level callers route here, and the queue lives in the scheduler.
-What microtasks are for, and the concurrent-iterator pattern built on them, is shown in
+A scheduler that cannot accept the task throws; a silent `false` would lose the task with no one
+noticing. What microtasks are for, and the concurrent-iterator pattern built on them, is shown in
 "Microtasks in practice: a concurrent iterator" below.
 
-#### `onWaitInfo(object $coroutine, string $info): bool`
+#### `onWaitInfo(object $coroutine, string $info): void`
 
 Lets the caller record what a coroutine is waiting for, as a human-readable string
 (`"socket #7 (readable)"`, `"channel recv"`, …). May be called more than once if the coroutine is
 waiting on several events at once. The scheduler stores each description against the coroutine
 for introspection tooling and deadlock reports; the call carries no scheduling effect.
 
-#### `onShutdown(): bool`
+#### `onShutdown(): void`
 
 The hook fires right before the graceful shutdown phase begins, so the scheduler can clean up its
 own state. The request is not tied to a fixed lifecycle point: it comes from whoever decides that
@@ -614,9 +688,10 @@ thereby corrupt C state or silently change core behaviour. The internal context 
 structurally inaccessible from PHP; the boundary is enforced by construction rather than by
 convention.
 
-#### `contextFind(object $context, mixed $key): mixed` / `contextSet(...): bool` / `contextUnset(...): bool`
+#### `contextFind(object $context, mixed $key): mixed` / `contextSet(...): void` / `contextUnset(...): bool`
 
 Read, store, and remove values in a context. Keys are strings or objects (compared by identity).
+`contextUnset()` returns whether the key existed (`unset` semantics), not a success status.
 The internal context is operated on by C extensions directly, not through PHP.
 
 ### The internal context in practice
@@ -669,6 +744,21 @@ implicit start on the first asynchronous call.
 Consequently, a script that spawns background work and reaches its final statement does not
 silently discard that work: the scheduler defines the semantics of the end of the request.
 
+### Process forking
+
+`fork()` and a live scheduler do not mix: coroutines parked on the reactor, watcher descriptors
+and worker threads cannot survive a fork of the process. While a scheduler is active,
+`pcntl_fork()` therefore throws an `Error` unconditionally; the same guard applies to any
+extension that forks the request process.
+
+The escape hatch is a C-level hook pair, not a PHP API. A C extension that knows how to survive
+a fork (typically the scheduler itself, together with its reactor) registers `before_fork()`,
+which runs in the parent and decides whether this particular fork is allowed (the reference
+implementation permits it only while the main coroutine is the sole live one), and
+`after_fork_child()`, which reinitialises the reactor in the freshly forked child. Without a
+registered pair the engine's answer is simply "no". The exact C interface is documented in
+[SCHEDULER.md](SCHEDULER.md).
+
 ## Backward Incompatible Changes
 
 Three symbols are added to the `Async\` namespace: the `SchedulerHook` class, the `Scheduler`
@@ -689,10 +779,11 @@ A PHP 8.x release after 8.6 (the next minor available for new features).
 - **To Existing Extensions:** none by default. Extensions requiring async awareness receive a
   dedicated internal per-coroutine context keyed by process-unique numeric keys, inaccessible
   from PHP code.
-- **To `pcntl_fork()`:** it now throws when a coroutine other than the main one is alive. A
+- **To `pcntl_fork()`:** it now throws while a scheduler is active (see "Process forking"). A
   forked child cannot inherit a working copy of the reactor's state (see
-  [reactor.md §12](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md)), so
-  forking is only permitted while the main coroutine is the sole coroutine running.
+  [reactor.md §12](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md)); a
+  C-level fork-hook pair lets the scheduler permit specific cases (the reference implementation
+  allows forking only while the main coroutine is the sole coroutine running).
 - **To the Ecosystem:** stubs for one interface and two classes. Event-loop libraries (Revolt,
   ReactPHP, AMPHP, Swoole) obtain a common registration point in place of private, incompatible
   cores.
@@ -807,4 +898,10 @@ None yet.
 
 ## Changelog
 
+- **0.2**: one error channel for the PHP hooks: failures are exceptions, `bool` returns remain
+  only where `false` is data (`onEnqueue`: not accepted, `contextUnset`: key existed);
+  `register()` returns void and throws on every failure. `Continuation::switchTo()` gained an
+  `$error` parameter, and the full value/exception transfer contract is specified in the new
+  "Exceptions and value transfer" section. New "Process forking" section: `pcntl_fork()` throws
+  while a scheduler is active, with a C-level fork-hook pair as the escape hatch.
 - **0.1**: initial draft.
