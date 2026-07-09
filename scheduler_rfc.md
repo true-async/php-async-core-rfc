@@ -688,7 +688,9 @@ A PHP 8.x release after 8.6 (the next minor available for new features).
   all inactive without a registered scheduler.
 - **To Existing Extensions:** none by default. Extensions requiring async awareness receive a
   dedicated internal per-coroutine context keyed by process-unique numeric keys, inaccessible
-  from PHP code.
+  from PHP code. One concrete case: `pcntl_fork()` now throws when a coroutine other than the
+  main one is alive, since a forked child cannot inherit a working copy of the reactor's state
+  (see [reactor.md §12](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md)).
 - **To the Ecosystem:** stubs for one interface and two classes. Event-loop libraries (Revolt,
   ReactPHP, AMPHP, Swoole) obtain a common registration point in place of private, incompatible
   cores.

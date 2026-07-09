@@ -862,6 +862,12 @@ into freed memory because the request struct outlives every SQE that references 
    *Mitigation*: none at the reactor level; offload heavy work to the Thread API and feed back
    via `async_io_trigger`.
 
+10. **`fork()` with live coroutines.** A forked child inherits the parent's reactor state (e.g. a
+    libuv loop sharing the parent's epoll backend), which cannot be split between the two
+    processes and leaves the child's loop broken. *Addressed*: forking is only permitted while the
+    main coroutine is the sole coroutine running; an attempt to fork with any other coroutine
+    still alive throws instead of corrupting the child.
+
 ---
 
 ## References
