@@ -680,7 +680,7 @@ before.
 
 ## Proposed PHP Version(s)
 
-PHP 8.6.
+A PHP 8.x release after 8.6 (the next minor available for new features).
 
 ## RFC Impact
 
