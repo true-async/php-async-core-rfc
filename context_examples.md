@@ -1,7 +1,7 @@
 # Coroutine context in PHP core: worked examples
 
 How the per-coroutine contexts defined by the
-[Async Scheduler Hook API](scheduler_rfc.md) are used inside the PHP core itself. Every example
+[Async Scheduler Hook API](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md) are used inside the PHP core itself. Every example
 below runs today in the [TrueAsync engine tree](https://github.com/true-async/php-src/tree/true-async)
 and goes through the operations the RFC standardises as hooks: `getInternalContext()`,
 `contextFind()`, `contextSet()`, `contextUnset()`.
@@ -26,10 +26,10 @@ construction.
 
 ## Example 1: output buffering, `ob_start()`
 
-Output buffering is stateful: `ob_start()` pushes a handler onto a stack, and everything printed
-afterwards lands in that buffer. With thousands of coroutines interleaving in one process, a
-single process-global stack would mix their output. The fix costs no userland changes: the
-handler stack moves into the coroutine's internal context.
+Some functions need to keep state tied to a coroutine. An example is `ob_start()`: it pushes a
+handler onto a stack, and everything printed afterwards lands in that buffer. With thousands of
+coroutines interleaving in one process, a single process-global stack would mix their output. The
+fix costs no userland changes: the handler stack moves into the coroutine's internal context.
 
 At startup, the subsystem allocates its process-unique key once:
 
@@ -144,3 +144,73 @@ Both examples follow the same four steps, and any extension can too:
 
 What used to be process-global or static state becomes per-coroutine state with a defined
 lifetime, and userland code cannot touch any of it.
+
+## Example 3: a microtask-driven concurrent iterator
+
+A microtask is a callable that runs inside the scheduler's own tick, between coroutine switches;
+it never suspends and runs to completion right where the scheduler stands. One use is a
+concurrent iterator: a worker coroutine drives a loop over shared state, and a microtask watchdog
+re-spawns a replacement worker whenever the current one suspends, so exactly one coroutine ever
+drives the loop:
+
+```php
+// Pseudocode: spawn() and currentCoroutine() are the scheduler's helpers.
+final class ConcurrentIterator
+{
+    private ?object $owner = null;      // the coroutine currently driving the loop
+    private bool $done = false;
+
+    public function __construct(
+        private \Iterator $items,
+        private \Closure $handler,
+    ) {}
+
+    public function start(): void
+    {
+        Async\SchedulerHook::defer($this->tick(...));
+    }
+
+    /** The microtask: it fires only while the current worker is parked. */
+    private function tick(): void
+    {
+        if ($this->done) {
+            return;                     // finished: nothing left to staff
+        }
+
+        $this->owner = spawn($this->run(...));   // replacement takes the state over
+    }
+
+    /** The loop a worker runs. The handler may suspend anywhere. */
+    private function run(): void
+    {
+        $me = currentCoroutine();
+        Async\SchedulerHook::defer($this->tick(...));   // arm the watchdog for this run
+
+        while (!$this->done && $this->items->valid()) {
+            $item = $this->items->current();
+            $key = $this->items->key();
+            $this->items->next();       // advance before the handler, like foreach
+
+            ($this->handler)($item, $key);   // may suspend: the microtask then
+                                             // staffs a replacement worker
+            if ($this->owner !== $me) {
+                return;                 // someone took over while we slept:
+            }                           // exit at once, exactly one driver
+        }
+
+        $this->done = true;             // finished while still the owner
+    }
+}
+```
+
+This is exactly how the PHP engine runs object destructors during GC in concurrent mode.
+`gc_destructors_coroutine()` re-arms the microtask and iterates the destructor buffer; if a
+destructor suspends, the next tick's microtask (`zend_gc_destructors_coroutine_microtask()`)
+spawns a fresh destructor coroutine that continues from the shared index and becomes the owner,
+and the displaced one exits through the identity check
+(`GC_G(dtor_coroutine) != ZEND_ASYNC_CURRENT_COROUTINE`); see
+[zend_gc.c](https://github.com/true-async/php-src/blob/true-async/Zend/zend_gc.c). TrueAsync's
+general-purpose concurrent iterator
+([iterator.c](https://github.com/true-async/php-async/blob/main/iterator.c)) generalises the
+same shape: the iterator structure is itself the microtask, and it staffs worker coroutines up
+to a configurable concurrency limit over one shared position.

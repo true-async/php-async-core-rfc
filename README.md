@@ -1,6 +1,6 @@
 # PHP Async Core RFC
 
-**A thin, policy-free concurrency core for PHP.** The engine standardises one thing: how a
+**A thin, policy-free concurrency core for PHP.** The PHP engine standardises one thing: how a
 scheduler is activated and which component is in charge. Everything user-facing (coroutine
 classes, `spawn()`/`await()`, channels, event loops) stays with the scheduler and the
 ecosystem.
@@ -16,11 +16,11 @@ With no scheduler registered, PHP behaves exactly as it does today.
 
 | Document | What is inside |
 |---|---|
-| **[scheduler_rfc.md](scheduler_rfc.md)** | **The RFC: Async Scheduler Hook API.** The activation contract, the hook set, a minimal scheduler, worked examples. Start here. |
-| [SCHEDULER.md](SCHEDULER.md) | The exact engine invocation points, for scheduler implementers. |
-| [context_examples.md](context_examples.md) | How PHP core uses the per-coroutine contexts (`ob_start()`, `gethostbyname()`), and why the internal context is isolated from userland. |
-| [reactor.md](reactor.md) | Reactor C interface, a discussion draft: a callback-first `io_*` API (poll, streaming IO, timers, filesystem, DNS) and how it feeds the scheduler. Not an RFC. |
-| [example/](example/) | Runnable schedulers: the same cooperative scheduler on plain Fibers and on Continuations. |
+| **[scheduler_rfc.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md)** | **The RFC: Async Scheduler Hook API.** The activation contract, the hook set, a minimal scheduler, worked examples. Start here. |
+| [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md) | The exact engine invocation points, for scheduler implementers. |
+| [context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md) | How PHP core uses the per-coroutine contexts (`ob_start()`, `gethostbyname()`), and why the internal context is isolated from userland. |
+| [reactor.md](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md) | Reactor C interface, a discussion draft: a callback-first `io_*` API (poll, streaming IO, timers, filesystem, DNS) and how it feeds the scheduler. Not an RFC. |
+| [example/](https://github.com/true-async/php-async-core-rfc/tree/main/example) | Runnable schedulers: the same cooperative scheduler on plain Fibers and on Continuations. |
 
 ## Implementation
 

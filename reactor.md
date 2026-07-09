@@ -3,7 +3,7 @@
 - **Status:** Discussion draft (NOT an RFC, NOT a language proposal)
 - **Scope:** the C-level interface of the *reactor*, the component that multiplexes
   readiness/completion events for the scheduler described in
-  [scheduler_rfc.md](scheduler_rfc.md).
+  [scheduler_rfc.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md).
 - **Audience:** extension authors and reactor implementers.
 - **Companion:** [`Zend/zend_async_API.h`](https://github.com/true-async/php-src), the
   existing production reactor slots, whose model this document contrasts with and proposes
@@ -866,8 +866,8 @@ into freed memory because the request struct outlives every SQE that references 
 
 ## References
 
-- [scheduler_rfc.md](scheduler_rfc.md): the Scheduler Hook API this reactor feeds.
-- [SCHEDULER.md](SCHEDULER.md): exact engine invocation points for the scheduler.
+- [scheduler_rfc.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md): the Scheduler Hook API this reactor feeds.
+- [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md): exact engine invocation points for the scheduler.
 - `Zend/zend_async_API.h`: the existing retained-mode reactor slots and registration.
 - libuv `uv_read_cb` / `uv_timer_cb` / `uv_poll_cb` / `uv_getaddrinfo_cb` / `uv_close`: the
   closest existing-art for the typed-callback family and the close/free split.
