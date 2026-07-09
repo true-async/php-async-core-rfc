@@ -170,8 +170,9 @@ interface Scheduler
      * enqueue and a resume are the same thing). A non-null `$error` is raised at
      * the coroutine's suspension point (the scheduler delivers it through the
      * $error parameter of switchTo()); that is how cancellation and IO/timeout
-     * failures reach waiting code. Returns false when the coroutine was not
-     * accepted (the scheduler is shutting down): a quiet rejection, not an error.
+     * failures reach waiting code. Returns true when the coroutine is queued
+     * and will run; false when it was not accepted (the scheduler is shutting
+     * down): a quiet rejection, not an error.
      */
     public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool;
 
@@ -600,7 +601,8 @@ Make a coroutine runnable and place it in the run queue. Enqueuing a fresh corou
 a suspended one are the same operation. A non-null `$error` is raised at the coroutine's
 suspension point, which is how cancellation and IO/timeout failures reach waiting code; the
 scheduler delivers it with the `$error` parameter of `switchTo()` (see "Exceptions and value
-transfer"). `false` means the coroutine was not accepted (for example during shutdown): a quiet
+transfer"). The return value is data, not a success status: `true` means the coroutine is queued
+and will run; `false` means it was not accepted (for example during shutdown): a quiet
 rejection, not an error. What happens next depends on the caller: at a PHP-visible boundary the
 engine converts the rejection into a thrown `Error` (e.g. `Fiber::resume()` on an adopted fiber);
 a C caller such as a reactor callback observes the `false`, disposes of the error it was
