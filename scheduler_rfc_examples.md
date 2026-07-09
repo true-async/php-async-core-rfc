@@ -1,10 +1,12 @@
-# Coroutine context in PHP core: worked examples
+# Worked examples for the Async Scheduler Hook API
 
-How the per-coroutine contexts defined by the
+How the hooks and per-coroutine contexts defined by the
 [Async Scheduler Hook API](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md) are used inside the PHP core itself. Every example
-below runs today in the [TrueAsync engine tree](https://github.com/true-async/php-src/tree/true-async)
-and goes through the operations the RFC standardises as hooks: `getInternalContext()`,
-`contextFind()`, `contextSet()`, `contextUnset()`.
+below runs today in the [TrueAsync engine tree](https://github.com/true-async/php-src/tree/true-async).
+
+Examples 1 and 2 go through the context operations the RFC standardises as hooks:
+`getInternalContext()`, `contextFind()`, `contextSet()`, `contextUnset()`. Example 3 goes through
+the microtask hook, `onDefer()`.
 
 ## Why two contexts
 

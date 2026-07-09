@@ -352,7 +352,7 @@ path is single, cancellation and introspection see only ordinary coroutines. Sta
 uniform for the same reason: the per-coroutine machinery, the two contexts and the wait-info
 descriptions, applies to the main flow simply because it is a coroutine. Output buffering shows
 this concretely: buffers opened by the plain request flow move into the main coroutine's context
-when concurrency starts (see [context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md)), rather than living in
+when concurrency starts (see [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md)), rather than living in
 a main-only global beside everyone else's per-coroutine state.
 
 This normalisation also pins down the return value of `onSuspend()` precisely. The call returns
@@ -606,7 +606,7 @@ reference to cannot be read or overwritten by unrelated code guessing a string k
 same encapsulation pattern JavaScript relies on for private state (a private `Symbol`).
 
 The two stores are separate for safety, not convenience. Internal-context values are raw C data
-(the worked examples in [context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md) store bare pointers),
+(the worked examples in [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md) store bare pointers),
 addressed by numeric keys that PHP code cannot even name. If C-extension state lived in the
 userland context, ordinary PHP code could reach it through the same context operations it uses
 for its own keys: overwrite a pointer, unset an entry whose memory C code still owns, and
@@ -629,7 +629,7 @@ pattern (allocate a key, create state on first use, dispose it on the coroutine'
 resolve through the current coroutine) applies to any core subsystem or extension with
 process-global state to make coroutine-safe.
 
-[context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md) collects the worked examples with the actual code:
+[scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md) collects the worked examples with the actual code:
 output buffering and `gethostbyname()`, whose traditional static result buffer becomes
 per-coroutine state the same way.
 
@@ -645,7 +645,7 @@ One example use is a concurrent iterator: a worker coroutine drives the loop, an
 watchdog spawns a replacement worker whenever the current one suspends, so exactly one coroutine
 drives the loop at a time. This is also exactly how the PHP engine itself runs object destructors
 during GC in concurrent mode. See
-[context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md)
+[scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md)
 for the worked-out code for both.
 
 ### PHP engine invocation points
@@ -797,9 +797,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 - `Io\Poll` (`main/php_poll.h`): the readiness-multiplexing API in php-src master, suitable as the
   IO source for a userland event loop.
 - [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md): the exact PHP engine invocation points, for implementers.
-- [context_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/context_examples.md): how PHP core uses the per-coroutine contexts
-  (`ob_start()` buffering, `gethostbyname()`), and why the internal context is isolated from
-  userland.
+- [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md): worked examples with real code —
+  per-coroutine contexts (`ob_start()` buffering, `gethostbyname()`) and the microtask-driven
+  concurrent iterator.
 
 ## Rejected Features
 
