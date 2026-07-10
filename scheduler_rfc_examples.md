@@ -4,27 +4,27 @@ How the hooks and per-coroutine contexts defined by the
 [Async Scheduler Hook API](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md) are used inside the PHP core itself. Every example
 below runs today in the [TrueAsync engine tree](https://github.com/true-async/php-src/tree/true-async).
 
-Examples 1 and 2 go through the context operations the RFC standardises as hooks:
-`getInternalContext()`, `contextFind()`, `contextSet()`, `contextUnset()`. Example 3 goes through
-the microtask hook, `onDefer()`.
+Examples 1 and 2 go through the engine-owned internal context, stored directly in the
+coroutine structure (see "The coroutine context" in the RFC). Example 3 goes through the
+microtask hook, `onDefer()`.
 
-## Why two contexts
+## Why the internal context is engine-owned and C-only
 
-Each coroutine carries two key/value stores:
+The internal context is the coroutine's C-side key/value store: numeric keys allocated once per
+process with `zend_async_internal_context_key_alloc()`, values owned by C code; reachable only
+from C. It lives in the engine's coroutine structure, so a lookup costs a field access plus a
+hash probe, which matters on a hot path: Example 1 resolves it on every byte printed.
 
-- the **userland context**: string or object keys, ordinary PHP values; application state such
-  as a request id, a tracing span, a locale;
-- the **internal context**: numeric keys allocated once per process with
-  `zend_async_internal_context_key_alloc()`, values owned by C code; reachable only from C.
+Its inaccessibility from PHP is a safety boundary, not a limitation. The values are raw C data:
+both examples below store bare pointers (`IS_PTR` zvals) to `ecalloc`'d structures. If they
+lived in PHP-visible storage, ordinary PHP code could reach that state through ordinary
+operations: read a pointer as if it were a value, overwrite it, or unset an entry whose memory
+C code still owns. Any of those corrupts C state or silently changes core behaviour. Keeping
+the internal context structurally inaccessible from PHP removes that entire class of failure;
+no discipline or naming convention is required, the boundary is enforced by construction.
 
-The split is a safety boundary, not a convenience. Internal-context values are raw C data: both
-examples below store bare pointers (`IS_PTR` zvals) to `ecalloc`'d structures. If the two stores
-were merged, ordinary PHP code could reach that state through the same context operations it
-uses for its own keys: read a pointer as if it were a value, overwrite it, or unset an entry
-whose memory C code still owns. Any of those corrupts C state or silently changes core
-behaviour. Keeping the internal context structurally inaccessible from PHP removes that entire
-class of failure; no discipline or naming convention is required, the boundary is enforced by
-construction.
+A **userland** context (string or object keys holding application state such as a request id,
+a tracing span, a locale) is the scheduler's own user-facing API, outside the RFC.
 
 ## Example 1: output buffering, `ob_start()`
 

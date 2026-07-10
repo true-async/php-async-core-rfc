@@ -1,6 +1,6 @@
 # PHP RFC: Async Scheduler Hook API
 
-- **Version:** 0.2
+- **Version:** 0.3
 - **Date:** 2026-07-09
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
@@ -47,8 +47,8 @@ the behaviour of the PHP core, without baking any concrete Scheduler implementat
 PHP engine. **Extensions and third-party code remain free to define arbitrary functions, classes and
 APIs on top of the registered scheduler** (`spawn()`, `await()`, channels, futures, an `Async\`
 namespace), **and this RFC intentionally defines none of them.** The class of the coroutine
-object, the transfer of values between coroutines, and the shape of the user-facing API are the
-exclusive domain of the scheduler implementation. The
+object, the transfer of values between coroutines, the userland coroutine context, and the shape
+of the user-facing API are the exclusive domain of the scheduler implementation. The
 [True Async RFC](https://wiki.php.net/rfc/true_async) is one such API, built on this core.
 
 This separation is deliberate. The PHP engine standardises *how concurrency is activated and which
@@ -144,14 +144,14 @@ final class Continuation
  * minted via createContinuation and entered with its own switchTo(). A
  * *coroutine* is the schedulable unit the scheduler builds on top of a
  * Continuation; the RFC does not type it (it is the scheduler's own object).
- * enqueue/suspend/context and the current-coroutine accessor all speak in
+ * enqueue/suspend and the current-coroutine accessor all speak in
  * coroutines, not continuations.
  *
  * Failures are reported by exceptions, never by return values. Where a hook
  * does return `bool`, the value is data, not a status: onEnqueue() reports
  * whether the coroutine was accepted (false during shutdown is a normal
- * state), contextUnset() whether the key existed. Every other hook returns
- * void; a hook that cannot do its job throws (see "Exceptions").
+ * state). Every other hook returns void; a hook that cannot do its job
+ * throws (see "Exceptions").
  */
 interface Scheduler
 {
@@ -195,20 +195,6 @@ interface Scheduler
      * Used by introspection tooling and deadlock reports.
      */
     public function onWaitInfo(object $coroutine, string $info): void;
-
-    // --- Coroutine context (queries/providers, not events, so no on-prefix) ---
-
-    /** The coroutine's userland context (string/object keys). */
-    public function getContext(object $coroutine): object;
-
-    /** The coroutine's internal context (numeric keys, for C extensions). */
-    public function getInternalContext(object $coroutine): object;
-
-    public function contextFind(object $context, mixed $key): mixed;
-    public function contextSet(object $context, mixed $key, mixed $value): void;
-
-    /** Returns whether the key existed (unset semantics), not success. */
-    public function contextUnset(object $context, mixed $key): bool;
 }
 
 /** Activation point for the concurrent mode. */
@@ -364,7 +350,7 @@ would fork in two: switch into a coroutine or back into main, cancel a coroutine
 queue coroutines but keep a dedicated slot for the one flow that is not one. Adopting main once,
 at its first yield, deletes the second branch everywhere: the queues hold one type, the switch
 path is single, cancellation and introspection see only ordinary coroutines. State becomes
-uniform for the same reason: the per-coroutine machinery, the two contexts and the wait-info
+uniform for the same reason: the per-coroutine machinery, the internal context and the wait-info
 descriptions, applies to the main flow simply because it is a coroutine. Output buffering shows
 this concretely: buffers opened by the plain request flow move into the main coroutine's context
 when concurrency starts (see [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md)), rather than living in
@@ -435,17 +421,12 @@ final class MyCoroutine
     public ?\Throwable $pendingError = null;
     public ?\Throwable $unhandledException = null;
     public bool $isMain = false;
-    public object $context;
-    public object $internal;
 
     public function __construct(public readonly \Closure|\Fiber|Async\Continuation $body)
     {
         if ($body instanceof Async\Continuation) {
             $this->continuation = $body;   // an already-running flow, adopted as is
         }
-
-        $this->context = new \stdClass();
-        $this->internal = new \stdClass();
     }
 }
 
@@ -546,15 +527,6 @@ final class MiniScheduler implements Async\Scheduler
     {
         // Policy decision: stop accepting work, then cancel or drain the rest.
     }
-
-    // Contexts: plain per-coroutine stores; the storage strategy (arrays,
-    // SplObjectStorage for object keys, ...) is the scheduler's choice.
-    public function getContext(object $coroutine): object         { return $coroutine->context; }
-    public function getInternalContext(object $coroutine): object { return $coroutine->internal; }
-
-    public function contextFind(object $context, mixed $key): mixed { /* ... */ }
-    public function contextSet(object $context, mixed $key, mixed $value): void { /* ... */ }
-    public function contextUnset(object $context, mixed $key): bool { /* ... */ }
 }
 
 Async\SchedulerHook::register('mini',
@@ -669,32 +641,31 @@ instead of tearing the request down mid-flight. From here the scheduler stops ac
 and decides the fate of the remaining coroutines: run them to completion, or cancel them by
 enqueuing with an error.
 
-#### `getContext(object $coroutine): object` / `getInternalContext(object $coroutine): object`
+### The coroutine context
 
-Each coroutine carries two key/value contexts. The **userland** context uses string/object keys
-(request id, tracing span, locale); the **internal** context is a separate store reserved for C
-extensions, keyed by process-unique numeric keys. These getters return the context object, which
-is read and written through the operations below. Whether a context is inherited along spawn
-chains is the scheduler's policy, not part of this contract.
+A coroutine needs memory of its own. Everything built on top of the scheduler depends on it:
+frameworks keep the request id, DI scopes and transaction state per flow, and many PHP functions
+keep state that used to be safely global and becomes per-coroutine the moment flows interleave.
+Without it, nothing above the scheduler works. And it is a hot path: output buffering resolves
+its handler stack on every byte printed, orders of magnitude more often than any context switch
+occurs. Both facts point the same way: the context is not scheduling policy to route through
+hooks, but engine machinery. It lives directly in the engine's coroutine structure and is
+accessed at C speed, with no scheduler involvement.
 
-Object keys exist so a library can keep its context entry private: an object only it holds a
-reference to cannot be read or overwritten by unrelated code guessing a string key. This is the
-same encapsulation pattern JavaScript relies on for private state (a private `Symbol`).
+The engine owns one such store per coroutine: the **internal context**, reserved for the engine
+and C extensions. Keys are process-unique numeric ids, allocated once per process from a static
+C-string name; C code reads and writes values through three operations (find/set/unset, taking
+the current or an explicit coroutine), and the store dies with the coroutine. The internal
+context is structurally inaccessible from PHP, and that is the point: its values are raw C data
+(the worked examples in [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md) store bare pointers), and
+if they lived in PHP-visible storage, ordinary PHP code could overwrite a pointer or unset an
+entry whose memory C code still owns, corrupting C state. The boundary is enforced by
+construction rather than by convention.
 
-The two stores are separate for safety, not convenience. Internal-context values are raw C data
-(the worked examples in [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md) store bare pointers),
-addressed by numeric keys that PHP code cannot even name. If C-extension state lived in the
-userland context, ordinary PHP code could reach it through the same context operations it uses
-for its own keys: overwrite a pointer, unset an entry whose memory C code still owns, and
-thereby corrupt C state or silently change core behaviour. The internal context is therefore
-structurally inaccessible from PHP; the boundary is enforced by construction rather than by
-convention.
-
-#### `contextFind(object $context, mixed $key): mixed` / `contextSet(...): void` / `contextUnset(...): bool`
-
-Read, store, and remove values in a context. Keys are strings or objects (compared by identity).
-`contextUnset()` returns whether the key existed (`unset` semantics), not a success status.
-The internal context is operated on by C extensions directly, not through PHP.
+A **userland** context (string/object keys: request id, tracing span, locale) is deliberately
+not part of this contract. Its consumers live in PHP, and a scheduler implements it in its own
+coroutine class with no engine involvement, inheritance policy included: it belongs to the
+user-facing API layer, together with `spawn()` and `await()`.
 
 ### The internal context in practice
 
@@ -900,6 +871,11 @@ None yet.
 
 ## Changelog
 
+- **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
+  structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
+  memory is what everything above the scheduler depends on); the userland context joins
+  `spawn()`/`await()` in the scheduler's user-facing API, outside this contract. The `Scheduler`
+  interface shrinks to the six event hooks.
 - **0.2**: one error channel for the PHP hooks: failures are exceptions, `bool` returns remain
   only where `false` is data (`onEnqueue`: not accepted, `contextUnset`: key existed);
   `register()` returns void and throws on every failure. `Continuation::switchTo()` gained an

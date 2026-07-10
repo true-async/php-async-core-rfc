@@ -58,7 +58,7 @@ the resumer, which on the coroutine path is the scheduler's own resume call.
 ## Error Channel
 
 The PHP hooks report failure only by throwing; where a hook returns `bool`,
-the value is data (`onEnqueue`: accepted or not, `contextUnset`: key existed).
+the value is data (`onEnqueue`: accepted or not).
 The C slots stay `bool`: C has no exceptions, and a reactor callback needs a
 cheap answer without stack unwinding. The registration bridge maps between
 the two: a PHP hook that throws makes the slot report failure with the
