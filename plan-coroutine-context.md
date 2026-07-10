@@ -46,9 +46,12 @@ mechanism, not scheduling policy. Five of the ten interface methods were context
 
 ## Known gaps (PoC level)
 
-- Continuation-backed coroutine handles (and their internal context) are released at
-  unregistration, not at coroutine finish: the bridge has no finish signal for the scheduler's
-  own coroutines yet. Candidate fix: a finish notification on the record-current path or an
-  explicit bridge contract.
+- ~~Continuation-backed coroutine handles (and their internal context) are released at
+  unregistration, not at coroutine finish.~~ Resolved: the context must not outlive the
+  coroutine, so the bridge installs a C destructor on the coroutine object itself (a
+  per-class copy of the object handlers with free_obj wrapped); the handle and its internal
+  context are destroyed the moment the object dies. Fiber-adopted handles keep their stronger
+  lifetime: the fiber machinery holds a raw pointer, so the handle pins the object and the
+  fiber teardown drives the release.
 - Raw-pointer values stored in the internal context are freed by their owning extension; the
   engine only drops the zval slots.
