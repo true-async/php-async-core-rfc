@@ -759,6 +759,15 @@ provides storage and access, nothing more. A fresh coroutine starts with an empt
 whether a child sees the spawner's values (a copy, a link, or nothing) is inheritance policy,
 and that stays in the scheduler's user-facing API, together with `spawn()` and `await()`.
 
+Both stores are implemented in the proof of concept, C extensions reaching the userland store
+through `zend_async_context_find/set/unset`, and are covered by tests on both sides:
+[Zend/tests/async](https://github.com/true-async/php-src/tree/async-core/Zend/tests/async)
+(`context_*.phpt`: the schedulerless main store, per-coroutine isolation, survival of main's
+values through adoption) and
+[ext/test_scheduler/tests](https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler/tests)
+(tests 013 and 032-034: the internal context, isolation under a C scheduler, C/PHP
+cross-visibility, lifetime and object-key ownership).
+
 ### The internal context in practice
 
 Some functions need to keep state tied to a coroutine. An example is `ob_start()`: it pushes a
@@ -936,6 +945,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
   (core, PHP engine invocation points, phpdbg, the PHP registration bridge and its tests).
+  Includes the full context implementation: `Async\Context`, `Async\get_context()` and the
+  `zend_async_context_*` C API, with tests in
+  [Zend/tests/async](https://github.com/true-async/php-src/tree/async-core/Zend/tests/async).
 - Test scheduler: https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler,
   an in-tree C scheduler (the C twin of the MiniScheduler above) filling every ABI slot from a
   separate Zend extension, with the .phpt suite exercising the hooks end to end. Built only with
@@ -977,7 +989,9 @@ None yet.
   C-only, unchanged. The scheduler loops (the reactor sketch and the MiniScheduler) gain the
   hand-off rule and park-to-main, fixing a lost-flow bug the in-tree test scheduler
   (ext/test_scheduler, the new runtime validation of the ABI) uncovered; the shutdown section now
-  states that cancelled coroutines must be unwound, not dropped.
+  states that cancelled coroutines must be unwound, not dropped. The context API is implemented
+  in the proof of concept (engine, PHP bridge and the test scheduler), tests on both the PHP and
+  the C side.
 - **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
   structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
   memory is what everything above the scheduler depends on); the userland context joins
