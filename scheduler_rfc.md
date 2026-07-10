@@ -352,10 +352,21 @@ public function onSuspend(bool $fromMain, bool $isBailout): ?object
     while ($this->hasLiveCoroutines()) {
         if ($this->ready->isEmpty()) {
             Poll::run(block: true);        // sleep in the kernel until an fd/timer fires;
-        }                                  // its callback re-queues the woken coroutine
-        
-		$current = $this->ready->dequeue();
-        $current->switchTo();              // (or drive its adopted fiber)
+            continue;                      // its callback re-queues the woken coroutine
+        }
+
+        $current = $this->ready->dequeue();
+
+        if ($current === $self) {
+            break;                         // its own turn came: return from the suspension
+        }
+
+        $this->handoff = $current;         // mark the deliberate wake (see the worked
+        $current->switchTo();              // example below), or drive its adopted fiber
+
+        if ($this->handoff === $self) {
+            break;                         // $self was dequeued while it was scheduling
+        }
     }
 
     return $self;                          // this frame resumes when $self runs again
@@ -468,6 +479,12 @@ final class MiniScheduler implements Async\Scheduler
     private \SplObjectStorage $waitInfo;    // coroutine => what it is waiting for
     private ?MyCoroutine $main = null;      // the adopted main flow
 
+    // The hand-off marker: set right before a deliberate switch into a
+    // dequeued coroutine. The flow that regains control reads it to tell
+    // "my own turn came" (stop scheduling, return from the suspension)
+    // from "a coroutine finished or parked into me" (keep draining).
+    private ?MyCoroutine $handoff = null;
+
     // The capabilities arrive through the constructor, so the scheduler is
     // created in a valid state and only the scheduler holds them.
     public function __construct(
@@ -509,16 +526,30 @@ final class MiniScheduler implements Async\Scheduler
             $self->isMain = true;
         }
 
-        while (!$this->ready->isEmpty() || !$this->microtasks->isEmpty()) {
+        while (true) {
             while (!$this->microtasks->isEmpty()) {
                 ($this->microtasks->dequeue())();    // one tick of microtasks
             }
 
             if ($this->ready->isEmpty()) {
-                break;                               // a real scheduler blocks in
-            }                                        // the reactor here
+                if ($self === $this->main) {
+                    break;                           // everything ran dry: main returns
+                }                                    // (a real scheduler blocks in the
+                                                     // reactor here instead)
+
+                // A dry queue in a coroutine: park by waking the main loop,
+                // which keeps draining. Control comes back only on a
+                // deliberate wake; then return from the suspension.
+                $this->main->continuation->switchTo();
+                break;
+            }
 
             $current = $this->ready->dequeue();
+
+            if ($current === $self) {
+                break;                               // a self-resume: the flow yielded
+            }                                        // and its own turn came
+
             $current->continuation ??= ($this->createContinuation)($current->body);
 
             $error = $current->pendingError;
@@ -527,14 +558,22 @@ final class MiniScheduler implements Async\Scheduler
             try {
                 // A pending error is thrown at the suspension point inside;
                 // an adopted fiber is driven with resume()/throw() instead.
+                $this->handoff = $current;           // a deliberate wake: its turn came
                 $current->continuation->switchTo(null, $error);
             } catch (\Throwable $unhandled) {
                 // The body finished with an uncaught exception: it surfaces
                 // here, at the switch site. Record it on the coroutine.
                 $current->unhandledException = $unhandled;
             }
+
+            if ($this->handoff === $self) {
+                break;                               // this flow was dequeued while it
+            }                                        // was scheduling: stop and resume it
+
+            // $current finished or parked: keep draining.
         }
 
+        $this->handoff = null;
         return $self;    // this frame resumes when $self runs again: record it
     }
 
@@ -570,6 +609,15 @@ it only fires the hooks and records what `onSuspend()` returns. The user-facing 
 here) is ordinary code the scheduler adds on top. And replacing the naive loop with the reactor
 version from the previous section turns this sketch into a real event-driven scheduler without
 changing any signature.
+
+One control-flow rule deserves emphasis, because omitting it is the classic bug of a distributed
+loop: control returning from `switchTo()` has two distinct meanings. Either this flow was itself
+dequeued (its turn came: stop scheduling and return from the suspension), or the coroutine it
+switched into finished or parked (keep draining; only the main flow is woken this way). The
+`$handoff` marker tells the two apart. Without it, a flow frozen in the middle of its own loop is
+scheduled past and lost: it holds a live stack that nothing will ever resume. The reference C
+scheduler ([ext/test_scheduler](https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler))
+hit exactly this in its first test run; the loop above is the corrected shape it converged on.
 
 ### Hook specification
 
@@ -671,6 +719,13 @@ concurrency must end early — in the reference stack, `exit()` inside a corouti
 instead of tearing the request down mid-flight. From here the scheduler stops accepting new work
 and decides the fate of the remaining coroutines: run them to completion, or cancel them by
 enqueuing with an error.
+
+Cancelling is not the same as dropping. A suspended coroutine holds a live stack (its VM frames
+and everything they reference), and simply releasing the object leaks it. The scheduler must wake
+the coroutine one last time with a termination error through the usual channel, the engine's
+unwind-exit is made for this, so the stack unwinds: `finally` blocks run, frame-held resources
+are released. The same duty applies at the end of the request to coroutines still parked with
+nobody left to resume them.
 
 ### The coroutine context
 
@@ -881,6 +936,10 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
   (core, PHP engine invocation points, phpdbg, the PHP registration bridge and its tests).
+- Test scheduler: https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler,
+  an in-tree C scheduler (the C twin of the MiniScheduler above) filling every ABI slot from a
+  separate Zend extension, with the .phpt suite exercising the hooks end to end. Built only with
+  `--enable-test-scheduler`, activated by `test_scheduler.enable=1`.
 - Scheduler extension: https://github.com/true-async/true-async, the reference C implementation
   of the hooks for this core.
 
@@ -901,6 +960,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 - [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md): worked examples with real code —
   per-coroutine contexts (`ob_start()` buffering, `gethostbyname()`) and the microtask-driven
   concurrent iterator.
+- [ext/test_scheduler](https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler):
+  the in-tree test scheduler; the runtime proof that the C ABI is implementable from a separate
+  extension.
 
 ## Rejected Features
 
@@ -912,7 +974,10 @@ None yet.
   string/object keys) and `Async\get_context(?object $coroutine = null)`, so context-consuming
   libraries stay scheduler-agnostic. Storage and access are engine-owned and per-coroutine;
   inheritance policy remains with the scheduler's user-facing API. The internal context stays
-  C-only, unchanged.
+  C-only, unchanged. The scheduler loops (the reactor sketch and the MiniScheduler) gain the
+  hand-off rule and park-to-main, fixing a lost-flow bug the in-tree test scheduler
+  (ext/test_scheduler, the new runtime validation of the ABI) uncovered; the shutdown section now
+  states that cancelled coroutines must be unwound, not dropped.
 - **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
   structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
   memory is what everything above the scheduler depends on); the userland context joins
