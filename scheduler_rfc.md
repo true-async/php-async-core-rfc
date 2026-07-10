@@ -1,7 +1,7 @@
 # PHP RFC: Async Scheduler Hook API
 
-- **Version:** 0.3
-- **Date:** 2026-07-09
+- **Version:** 0.4
+- **Date:** 2026-07-10
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
 - **Implementation:** https://github.com/php/php-src/pull/22561
@@ -47,7 +47,7 @@ the behaviour of the PHP core, without baking any concrete Scheduler implementat
 PHP engine. **Extensions and third-party code remain free to define arbitrary functions, classes and
 APIs on top of the registered scheduler** (`spawn()`, `await()`, channels, futures, an `Async\`
 namespace), **and this RFC intentionally defines none of them.** The class of the coroutine
-object, the transfer of values between coroutines, the userland coroutine context, and the shape
+object, the transfer of values between coroutines, and the shape
 of the user-facing API are the exclusive domain of the scheduler implementation. The
 [True Async RFC](https://wiki.php.net/rfc/true_async) is one such API, built on this core.
 
@@ -104,7 +104,7 @@ registered scheduler does.
 
 ### The API
 
-The complete surface added by this RFC: three symbols in the `Async\` namespace.
+The complete surface added by this RFC: five symbols in the `Async\` namespace.
 
 ```php
 namespace Async;
@@ -232,6 +232,37 @@ final class SchedulerHook
      */
     public static function defer(callable $task): void {}
 }
+
+/**
+ * The userland context of a coroutine: coroutine-local key-value storage with
+ * string or object keys. Created lazily on first access and destroyed with the
+ * coroutine. The engine provides storage and access only: a fresh coroutine
+ * starts with an empty context, and any inheritance policy (what a child sees
+ * of the spawner's values) belongs to the scheduler's user-facing API, next to
+ * spawn(). See "The coroutine context".
+ */
+final class Context
+{
+    /** The value stored under $key, or null when absent. */
+    public function find(string|object $key): mixed {}
+
+    /** Whether $key exists: distinguishes an absent key from a stored null. */
+    public function has(string|object $key): bool {}
+
+    /** Store $value under $key. Returns $this for chaining. */
+    public function set(string|object $key, mixed $value): Context {}
+
+    /** Remove $key. The return value is data, not a status: whether the key existed. */
+    public function unset(string|object $key): bool {}
+}
+
+/**
+ * The context of $coroutine, or of the currently running flow when null (main
+ * included, whether or not a scheduler is registered). The explicit-object form
+ * is how a scheduler reaches a coroutine's context from outside it, e.g. to
+ * implement its inheritance policy in spawn().
+ */
+function get_context(?object $coroutine = null): Context {}
 ```
 
 ### Design rationale
@@ -652,7 +683,7 @@ occurs. Both facts point the same way: the context is not scheduling policy to r
 hooks, but engine machinery. It lives directly in the engine's coroutine structure and is
 accessed at C speed, with no scheduler involvement.
 
-The engine owns one such store per coroutine: the **internal context**, reserved for the engine
+The engine owns two such stores per coroutine. The first is the **internal context**, reserved for the engine
 and C extensions. Keys are process-unique numeric ids, allocated once per process from a static
 C-string name; C code reads and writes values through three operations (find/set/unset, taking
 the current or an explicit coroutine), and the store dies with the coroutine. The internal
@@ -662,10 +693,16 @@ if they lived in PHP-visible storage, ordinary PHP code could overwrite a pointe
 entry whose memory C code still owns, corrupting C state. The boundary is enforced by
 construction rather than by convention.
 
-A **userland** context (string/object keys: request id, tracing span, locale) is deliberately
-not part of this contract. Its consumers live in PHP, and a scheduler implements it in its own
-coroutine class with no engine involvement, inheritance policy included: it belongs to the
-user-facing API layer, together with `spawn()` and `await()`.
+The **userland** context (string/object keys: request id, tracing span, locale) is the second
+store, and it is part of this contract for one reason: portability. Its consumers are libraries
+(tracing, logging, DI scopes) that must reach the current flow's context without knowing which
+scheduler is installed; if every scheduler exposed its own accessor, no such library could be
+scheduler-agnostic. `Async\get_context()` returns the current flow's `Context` (main included,
+whether or not a scheduler is registered), and `get_context($coroutine)` the store of a given
+coroutine object; either way the store is created lazily and dies with its coroutine. The engine
+provides storage and access, nothing more. A fresh coroutine starts with an empty context:
+whether a child sees the spawner's values (a copy, a link, or nothing) is inheritance policy,
+and that stays in the scheduler's user-facing API, together with `spawn()` and `await()`.
 
 ### The internal context in practice
 
@@ -871,6 +908,11 @@ None yet.
 
 ## Changelog
 
+- **0.4**: the userland context gains a standard PHP API: `Async\Context` (find/has/set/unset,
+  string/object keys) and `Async\get_context(?object $coroutine = null)`, so context-consuming
+  libraries stay scheduler-agnostic. Storage and access are engine-owned and per-coroutine;
+  inheritance policy remains with the scheduler's user-facing API. The internal context stays
+  C-only, unchanged.
 - **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
   structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
   memory is what everything above the scheduler depends on); the userland context joins
