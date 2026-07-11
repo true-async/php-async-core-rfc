@@ -720,13 +720,6 @@ instead of tearing the request down mid-flight. From here the scheduler stops ac
 and decides the fate of the remaining coroutines: run them to completion, or cancel them by
 enqueuing with an error.
 
-Cancelling is not the same as dropping. A suspended coroutine holds a live stack (its VM frames
-and everything they reference), and simply releasing the object leaks it. The scheduler must wake
-the coroutine one last time with a termination error through the usual channel, the engine's
-unwind-exit is made for this, so the stack unwinds: `finally` blocks run, frame-held resources
-are released. The same duty applies at the end of the request to coroutines still parked with
-nobody left to resume them.
-
 ### The coroutine context
 
 A coroutine needs memory of its own. Everything built on top of the scheduler depends on it:
@@ -988,10 +981,9 @@ None yet.
   inheritance policy remains with the scheduler's user-facing API. The internal context stays
   C-only, unchanged. The scheduler loops (the reactor sketch and the MiniScheduler) gain the
   hand-off rule and park-to-main, fixing a lost-flow bug the in-tree test scheduler
-  (ext/test_scheduler, the new runtime validation of the ABI) uncovered; the shutdown section now
-  states that cancelled coroutines must be unwound, not dropped. The context API is implemented
-  in the proof of concept (engine, PHP bridge and the test scheduler), tests on both the PHP and
-  the C side.
+  (ext/test_scheduler, the new runtime validation of the ABI) uncovered. The context API is
+  implemented in the proof of concept (engine, PHP bridge and the test scheduler), tests on both
+  the PHP and the C side.
 - **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
   structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
   memory is what everything above the scheduler depends on); the userland context joins
