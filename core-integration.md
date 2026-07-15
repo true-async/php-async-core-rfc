@@ -258,17 +258,30 @@ coroutine is force-closed: `ZEND_ASYNC_CANCEL(coroutine, graceful_exit,
 true)`. Idempotence of a repeated cancel is the scheduler's duty (the first
 graceful exit wins).
 
-### zend_fibers.c:1156-1173 — `zend_fiber_object_gc()`
+### zend_fibers.c — `zend_fiber_object_gc()`
 
-What: a **live** (unfinished) coroutine-mode fiber is a GC root: nothing is
-exposed; once `ZEND_COROUTINE_IS_FINISHED` — fci/result/transfer and the
-edge to the coroutine's zend_object are exposed.
-Why: a live fiber's stack belongs to the scheduler and is torn down at
-shutdown; scanning it early either collects it prematurely or miscounts
-refcounts over a half-unwound frame (the gh10496 crash). The edge to the
-coroutine after finishing is mandatory — without it, the
-fiber→coroutine→fcall→closure→fiber cycle was never collected (the gh9916
-leak).
+What: three states of a coroutine-mode fiber, three policies:
+- **running or awaiting inside the body** — a GC root: nothing is exposed.
+  The stack is mid-operation; scanning it miscounts refcounts over a
+  half-unwound frame (the gh10496 crash).
+- **parked at a clean `Fiber::suspend()`** — fci/transfer are exposed and
+  the frames of the parked stack are walked (`zend_fiber_frames_gc`,
+  shared with the legacy path, generator frames included via
+  `zend_generator_frame_gc`). This is the analog of TrueAsync's
+  `ZEND_COROUTINE_F_YIELD`-gated walk; our yield marker is
+  `fiber->context.status`, which only the yield path touches. It is what
+  lets an abandoned yielded fiber — and a generator parked on its stack —
+  collect before shutdown (upstream gh9735/gh10340 contract).
+- **finished** — fci/result/transfer and the edge to the coroutine's
+  zend_object are exposed. The edge is mandatory — without it, the
+  fiber→coroutine→fcall→closure→fiber cycle was never collected (the
+  gh9916 leak).
+
+The coroutine object itself is never put into the buffer while unfinished:
+the scheduler holds references GC cannot see. To make the walk safe, the
+yield path severs `stack_bottom->prev_execute_data` **before** parking —
+the walked chain must end at the fiber's own root frame, not run on into
+the caller's live frames.
 
 ### zend_fibers.c:573-603 — error_reporting for the fiber body
 
@@ -392,10 +405,10 @@ class without knowing its name.
 
 ## A known theoretical hole
 
-GC does not see live TMPVARs on the stacks of **other** parked coroutines:
-TrueAsync covers this by exposing parked stacks in the coroutine's get_gc;
-our roots model does not. It has not manifested so far; same cluster as the
-F_YIELD topic.
+GC does not see live TMPVARs on the stacks of coroutines parked **inside an
+await** (yielded fiber stacks are covered by the `zend_fiber_object_gc`
+walk above). TrueAsync narrows this the same way — its F_YIELD walk also
+covers only yielded fibers, not awaits. It has not manifested so far.
 
 ---
 
