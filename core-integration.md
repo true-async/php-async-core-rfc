@@ -403,12 +403,18 @@ This is the only place in the core that uses
 `ZEND_ASYNC_GET_EXCEPTION_CE` — the core needs the cancellation exception
 class without knowing its name.
 
-## A known theoretical hole
+## Parked coroutine stacks (the former "theoretical hole" — closed)
 
-GC does not see live TMPVARs on the stacks of coroutines parked **inside an
-await** (yielded fiber stacks are covered by the `zend_fiber_object_gc`
-walk above). TrueAsync narrows this the same way — its F_YIELD walk also
-covers only yielded fibers, not awaits. It has not manifested so far.
+The scheduler's coroutine get_gc exposes the frames of every suspended
+coroutine's parked stack via the core helper `zend_fiber_frames_gc()`
+(exported from zend_fibers.c): CVs, in-flight call arguments and — unlike
+TrueAsync, which passes its stacks through the same walk without the
+live-range part — live temporaries, since `zend_unfinished_execution_gc_ex`
+scans them unconditionally. Two exclusions keep the accounting exact: a
+fiber-coroutine parked at `Fiber::suspend()` is skipped (its frames belong
+to `zend_fiber_object_gc`), and a fiber-coroutine awaiting inside its body
+is walked only up to its own root frame (`fiber->stack_bottom`) — the
+frames past it are the caller's to expose.
 
 ---
 
