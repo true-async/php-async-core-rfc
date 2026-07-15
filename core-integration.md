@@ -403,18 +403,31 @@ This is the only place in the core that uses
 `ZEND_ASYNC_GET_EXCEPTION_CE` — the core needs the cancellation exception
 class without knowing its name.
 
-## Parked coroutine stacks (the former "theoretical hole" — closed)
+## Parked coroutine stacks (the former "theoretical hole" — resolved as a non-issue)
 
-The scheduler's coroutine get_gc exposes the frames of every suspended
-coroutine's parked stack via the core helper `zend_fiber_frames_gc()`
-(exported from zend_fibers.c): CVs, in-flight call arguments and — unlike
-TrueAsync, which passes its stacks through the same walk without the
-live-range part — live temporaries, since `zend_unfinished_execution_gc_ex`
-scans them unconditionally. Two exclusions keep the accounting exact: a
-fiber-coroutine parked at `Fiber::suspend()` is skipped (its frames belong
-to `zend_fiber_object_gc`), and a fiber-coroutine awaiting inside its body
-is walked only up to its own root frame (`fiber->stack_bottom`) — the
-frames past it are the caller's to expose.
+References held by the frames of an await-parked coroutine (live
+temporaries included) are invisible to the cycle collector — and that is
+safe by construction, on two grounds:
+
+1. Trial deletion is conservative: it only frees objects whose refcount it
+   can fully explain through visible edges. A reference from an invisible
+   frame slot leaves the refcount unexplained, so the object is always
+   kept — a premature free is impossible.
+2. Exposing the frame edges cannot enable any collection either: the
+   scheduler's live table anchors every parked coroutine with a reference
+   GC cannot see, so the coroutine — and everything its frames hold — is
+   externally rooted until it finishes; force-close at shutdown unwinds
+   the frames and releases the values.
+
+This was verified empirically: a full frame walk from the coroutine's
+get_gc (CVs, in-flight call args, live-range temporaries — the helper and
+a WeakReference-instrumented probe) produced zero observable difference in
+any scenario, so the walk was not merged. The net effect of invisibility
+is at most a deferred collection (until the value is consumed or the
+request ends), never a leak across the request and never a use-after-free.
+Yielded fiber stacks are different — there the fiber object is not
+scheduler-anchored, the walk is observable (gh9735), and it is
+implemented; see `zend_fiber_object_gc()` above.
 
 ---
 
