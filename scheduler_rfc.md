@@ -963,6 +963,9 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 - `Io\Poll` (`main/php_poll.h`): the readiness-multiplexing API in php-src master, suitable as the
   IO source for a userland event loop.
 - [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md): the exact PHP engine invocation points, for implementers.
+- [core-integration.md](https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md): every place the scheduler
+  integration touches in the php-src core — the request lifecycle, fibers as coroutines, the
+  synchronous GC, the PHP bridge and the testing strategy, file by file with the why.
 - [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md): worked examples with real code —
   per-coroutine contexts (`ob_start()` buffering, `gethostbyname()`) and the microtask-driven
   concurrent iterator.
