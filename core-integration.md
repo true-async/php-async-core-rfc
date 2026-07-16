@@ -454,14 +454,64 @@ implemented; see `zend_fiber_object_gc()` above.
 
 ---
 
-## Zend/zend_scheduler_hook.c — the PHP registration bridge
+## The coroutine context — Zend/zend_async_API.h/.c
 
-The userland face of the hook layer: `Async\SchedulerHook::register()` and
-the `Async\Scheduler` interface (onLaunch / onShutdown / onFiber /
-onEnqueue / onSuspend / onDefer). Each engine slot is backed by a C thunk
-that forwards to the bound scheduler method; the classes are registered at
-`zend_startup()` (zend.c), the handlers are dropped at `zend_deactivate()`
-before the executor shutdown, the coroutine-handle map after it.
+Coroutine-local storage is engine machinery, not scheduling policy; both
+stores live on `zend_coroutine_t`, and the core owns the layout and the
+operations. The engine registers no PHP class and zend.c carries no wiring.
+
+**The internal context** (C extensions only, structurally unreachable from
+PHP): a HashTable **embedded by value** in the coroutine — `zend_hash_init`
+defers the bucket array to the first insert, so an unused context costs
+nothing and the lazy-pointer allocation is gone. The provider calls
+`zend_async_internal_context_init/destroy` at the coroutine's birth and
+death. Keys are process-unique numbers allocated once per process from a
+static C-string name (`zend_async_internal_context_key_alloc`, typically at
+MINIT): the registry is deliberately a process-global static behind a ZTS
+mutex — a key must mean the same thing in every thread and request — and a
+repeated alloc with the same string address returns the same key.
+`zend_async_scheduler_unregister()` (a per-request event for the PHP
+bridge) does NOT touch the registry; only the process shutdown does.
+
+**The userland context** (`Async\Context`): the core defines a plain C
+struct — `zend_async_context_t { HashTable string_keys; HashTable
+object_keys; zend_object std; }` — plus the operations over it
+(`tables_init/destroy`, `entry_find/set/unset/gc`) and the coroutine-level
+view (`zend_async_context_get/find/set/unset/destroy`). `std` sits at a
+fixed offset inside the base, so `ZEND_ASYNC_CONTEXT_FROM_OBJ` is a
+constant `container_of` and an extension may wrap the struct with its own
+fields in front. The PHP class and `Async\get_context()` belong to a
+provider extension, which hands the core its factory through the
+`zend_async_new_context_fn` slot. An object-keyed entry owns the key object
+as well as the value: handles are reused once an object dies, and a stored
+key that outlived its object would alias whatever takes its handle next.
+
+There is no request-level store: no coroutine — no context.
+`get_context()` without a running scheduler is an `Error`. The main
+coroutine exists from the launch on, so the script's store is simply the
+main coroutine's store.
+
+---
+
+## ext/async_scheduler_hook — the PHP registration bridge
+
+The userland face of the hook layer, an optional in-tree extension
+(`--enable-async-scheduler-hook`, static or shared):
+`Async\SchedulerHook::register()`, the `Async\Scheduler` interface
+(onLaunch / onShutdown / onFiber / onEnqueue / onSuspend / onDefer), and
+the `Async\Context` / `Async\get_context()` surface over the engine's
+context storage. Each engine slot is backed by a C thunk that forwards to
+the bound scheduler method. The extension talks to the engine exclusively
+through exported `ZEND_API` — the runtime proof that the ABI seam is
+sufficient for a PHP-facing provider.
+
+The lifecycle maps onto the standard module hooks, which bracket the
+executor shutdown exactly as the teardown needs: MINIT registers the
+classes and the context factory; RSHUTDOWN (runs before
+`shutdown_executor()`) drops the handler container — it owns objects the
+store would otherwise report as leaked — and unregisters the scheduler;
+`ZEND_MODULE_POST_ZEND_DEACTIVATE` (runs after) sweeps the coroutine-handle
+map, once every coroutine object has taken its handle with it.
 
 The model is coroutine-centric: everything is keyed by the scheduler's own
 coroutine objects, and the execution context behind one is engine-internal —
@@ -503,7 +553,7 @@ throws it C-side.
 
 ---
 
-## Testing strategy: two variants in one binary
+## Testing strategy: two providers in one binary
 
 - test_scheduler is gated by `test_scheduler.enable` (PHP_INI_SYSTEM,
   default **0**): the extension loads but claims no scheduler slots unless
@@ -515,8 +565,9 @@ throws it C-side.
 - Tests whose behaviour legitimately differs under a scheduler are
   **duplicated** into ext/test_scheduler/tests (026-059, descriptive names)
   with `--INI-- test_scheduler.enable=1` and the scheduler-adapted EXPECTs.
-- The bridge tests (Zend/tests/async) register a PHP scheduler; a SKIPIF
-  guards against a binary where a C scheduler already took the slot.
+- The bridge and context tests live in ext/async_scheduler_hook/tests; they
+  register a PHP scheduler, and a SKIPIF guards against a binary where a C
+  scheduler already took the slot.
 
 ---
 
@@ -533,8 +584,9 @@ throws it C-side.
 | Zend/zend_globals.h | 171-196 | cursor of the shutdown destructor passes |
 | Zend/zend_execute_API.c | 260-335 | shutdown_destructors: switch handler + iterator |
 | Zend/zend_objects_API.c | 93-168 | same for the object store + fiber/coroutine skip (active-only) |
-| Zend/zend_scheduler_hook.c | — | the PHP registration bridge: SchedulerHook, Scheduler, Continuation |
-| Zend/zend.c | zend_startup / zend_deactivate | bridge class registration; two-phase teardown around the executor shutdown |
+| Zend/zend_async_API.h/.c | — | the ABI, the internal context (embedded), the userland context struct + ops |
+| ext/async_scheduler_hook | — | the PHP bridge: SchedulerHook, Scheduler, Context, get_context() |
+| ext/test_scheduler | — | the C reference scheduler (test_scheduler.enable, default off) |
 | Zend/zend_fibers.h | 147-154 | coroutine-mode fields in zend_fiber |
 | Zend/zend_fibers.c | 971-1022 | fiber adoption, start as a coroutine |
 | Zend/zend_fibers.c | 869-966 | yield/await via SUSPEND/RESUME |
