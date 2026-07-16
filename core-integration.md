@@ -1,358 +1,354 @@
 # Scheduler integration in the php-src core
 
-## Zend/zend_async_API.h + zend_async_API.c — the API itself
+## Zend/zend_async_API.h + zend_async_API.c: the API itself
 
 The key contracts everything else builds on:
 
-- `ZEND_ASYNC_IS_ACTIVE` / `ZEND_ASYNC_ON` — a scheduler is registered and
+- `ZEND_ASYNC_IS_ACTIVE` / `ZEND_ASYNC_ON`: a scheduler is registered and
   running for this request.
-- `ZEND_ASYNC_CURRENT_COROUTINE` — the current coroutine (NULL outside of
-  coroutines). The core constantly uses it both as a "we are in the async
-  world" marker and as a "the destructor suspended" detector (the value
-  changed — control flow left and came back).
-- `ZEND_ASYNC_SUSPEND()` / `ZEND_ASYNC_ENQUEUE_COROUTINE()` /
-  `ZEND_ASYNC_ENQUEUE_WITH_ERROR()` / `ZEND_ASYNC_AWAIT()` /
-  `ZEND_ASYNC_CANCEL()` — the basic scheduling operations. There is no
-  separate resume: enqueuing a fresh coroutine and resuming a suspended one
+- `ZEND_ASYNC_CURRENT_COROUTINE`: the current coroutine, NULL outside of
+  coroutines. The core uses it both as a "we are in the async world" marker
+  and as a suspend detector: if the value changed, control flow left and
+  came back.
+- `ZEND_ASYNC_SUSPEND()`, `ZEND_ASYNC_ENQUEUE_COROUTINE()`,
+  `ZEND_ASYNC_ENQUEUE_WITH_ERROR()`, `ZEND_ASYNC_AWAIT()`,
+  `ZEND_ASYNC_CANCEL()`: the basic scheduling operations. There is no
+  separate resume. Enqueuing a fresh coroutine and resuming a suspended one
   are one operation, and the error parameter of enqueue is the delivery
-  channel for cancellation and IO/timeout failures (raised at the
-  suspension point).
-- `await` stays a **slot**, not a series of finish-handler + suspend calls,
-  because awaiting is a scheduling decision: the provider owns the waiter
-  bookkeeping (it lives on the awaited coroutine), may wake the waiter with
-  a direct symmetric switch instead of the run queue, and marks the outcome
-  as observed (an awaited exception is not "unhandled").
-- `zend_coroutine_finish_handler_fn` (line 68) — the coroutine-end handler:
-  fires exactly once, no matter how the coroutine ends (return / exception /
-  cancellation / bailout unwind). It carries the `waiter`/`data` stored at
-  registration time and the `is_bailout` flag ("the scheduler is dying —
+  channel for cancellation and IO/timeout failures, raised at the
+  suspension point.
+- `await` stays a **slot** rather than a series of finish-handler and
+  suspend calls, because awaiting is a scheduling decision: the provider
+  owns the waiter bookkeeping (it lives on the awaited coroutine), may wake
+  the waiter with a direct symmetric switch instead of the run queue, and
+  marks the outcome as observed, so an awaited exception is not "unhandled".
+- `zend_coroutine_finish_handler_fn`: the coroutine-end handler. It fires
+  exactly once, no matter how the coroutine ends (return, exception,
+  cancellation, bailout unwind), and carries the `waiter`/`data` stored at
+  registration time plus the `is_bailout` flag ("the scheduler is dying,
   clean up only, schedule nothing"). This is the mechanism GC uses to wait
   for its iterators.
-- `zend_coroutine_switch_handler_fn` (line 62) — a synchronous hook on every
-  coroutine enter/leave. The shutdown destructor passes use it to notice a
+- `zend_coroutine_switch_handler_fn`: a synchronous hook on every coroutine
+  enter and leave. The shutdown destructor passes use it to notice a
   destructor suspending right at the context switch.
-- `zend_coroutine_awaiting_info_fn` — the awaiting-info vector: whoever
-  suspends a coroutine registers a handler+data pair describing ONE thing
+- `zend_coroutine_awaiting_info_fn`: the awaiting-info vector. Whoever
+  suspends a coroutine registers a handler+data pair describing one thing
   it waits for (`ZEND_ASYNC_ADD_AWAITING_INFO`); the descriptions are
-  collected with `ZEND_ASYNC_GET_AWAITING_INFO` (a packed array of strings)
-  and the scheduler wipes the whole vector when the coroutine is enqueued —
-  every wait description dies with the wait. Diagnostics only (wait-graph,
-  deadlock reports); replaces the old single `awaiting_info` field and the
-  `wait_info` string slot.
-- `ZEND_ASYNC_EXIT_EXCEPTION` — the "exception that terminates the request"
-  slot (deadlock, the chain accumulated during the drain). The slot lives in
-  the core; the policy of filling it lives in the extension.
+  collected with `ZEND_ASYNC_GET_AWAITING_INFO` as a packed array of
+  strings, and the scheduler wipes the whole vector when the coroutine is
+  enqueued: every wait description dies with the wait. Diagnostics only
+  (wait graph, deadlock reports); replaces the old single `awaiting_info`
+  field and the `wait_info` string slot.
+- `ZEND_ASYNC_EXIT_EXCEPTION`: the slot for the exception that terminates
+  the request (a deadlock, the chain accumulated during the drain). The
+  slot lives in the core; the policy of filling it lives in the extension.
 
 ---
 
-## main/main.c — the request lifecycle
+## main/main.c: the request lifecycle
 
-### main.c:2259 — `php_module_startup()`: `zend_async_globals_ctor()`
+### main.c:2259, `php_module_startup()`: `zend_async_globals_ctor()`
 
-What: initializes the Async API globals, next to `gc_globals_ctor()`.
-Why: the API slots and `zend_async_globals_t` must exist before extension
-MINIT — the scheduler registers itself in the MINIT of test_scheduler /
-ext-async.
+Initializes the Async API globals, next to `gc_globals_ctor()`. The API
+slots and `zend_async_globals_t` must exist before extension MINIT, because
+the scheduler registers itself in the MINIT of test_scheduler / ext-async.
 
-### main.c:2861 — `php_tsrm_startup_ex()`: TSRM block size
+### main.c:2861, `php_tsrm_startup_ex()`: TSRM block size
 
-What: `sizeof(zend_async_globals_t)` is accounted for in the preallocated
-ZTS globals block. Why: under ZTS all globals live in one aligned block;
-without this — an OOB access. (Hence the rule: any change to a globals
-struct layout requires `nmake clean`.)
+`sizeof(zend_async_globals_t)` is accounted for in the preallocated ZTS
+globals block. Under ZTS all globals live in one aligned block; without
+this the access is out of bounds. Hence the rule: any change to a globals
+struct layout requires `nmake clean`.
 
-### main.c:2671 — `php_execute_script()`: `ZEND_ASYNC_SCHEDULER_LAUNCH()`
+### main.c:2671, `php_execute_script()`: `ZEND_ASYNC_SCHEDULER_LAUNCH()`
 
-What: before executing the prepend/primary/append files, the core launches
-the scheduler. From this moment on, the script is the main coroutine.
-Why: the launch must not be lazy (a deliberate decision — TrueAsync
-abandoned lazy launch); this is the single launch point. `php -r` does not
-go through `php_execute_script` and gets no scheduler — `spawn()` there
-throws "The scheduler is not running".
+Before executing the prepend/primary/append files, the core launches the
+scheduler. From this moment on the script is the main coroutine. The launch
+is deliberately not lazy (TrueAsync abandoned lazy launch); this is the
+single launch point. `php -r` does not go through `php_execute_script` and
+gets no scheduler, so `spawn()` there throws "The scheduler is not
+running".
 
-### main.c:2683/2685 — `php_execute_script()`: `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN()`
+### main.c:2683/2685, `php_execute_script()`: `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN()`
 
-What: after the main script returns (2683) or bails out (2685, flag true),
-control is handed to the scheduler one last time — it finishes off the
-remaining coroutines (the drain).
-Why: main is over, but parked coroutines are still alive. Their finally
-blocks must run while async is still active. Control comes back on the
-engine's own context. An exception accumulated by the drain ends up in
-EG(exception) and is reported further down the function (2697), like any
-other.
+After the main script returns (2683) or bails out (2685, flag true),
+control is handed to the scheduler one last time to finish off the
+remaining coroutines: the drain. Main is over, but parked coroutines are
+still alive, and their finally blocks must run while async is still active.
+Control comes back on the engine's own context. An exception accumulated by
+the drain ends up in EG(exception) and is reported further down the
+function (2697), like any other.
 
-### main.c:2000-2007 — `php_request_shutdown()`: the final pass + consuming EG
+### main.c:2000-2007, `php_request_shutdown()`: the final pass, consuming EG
 
-What: after `zend_call_destructors()` — one more
+After `zend_call_destructors()` comes one more
 `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN(false)`: the destructors may have
-spawned or resumed coroutines. Then (2004) — if the pass left an exception
+spawned or resumed coroutines. Then (2004), if the pass left an exception
 in EG(exception), it is reported and released via `zend_exception_error`.
 
-Why the second step is needed — in detail (a port of TrueAsync fix
-4538c0619d). Every exception must have an "owner" — code that either
-catches it, or reports it as a fatal and releases the object. For the
-exceptions the scheduler's drain puts into EG(exception), the owner depends
-on which path executed the request:
+Why the second step is needed (a port of TrueAsync fix 4538c0619d): every
+exception must have an owner, code that either catches it or reports it as
+a fatal and releases the object. For the exceptions the scheduler's drain
+puts into EG(exception), the owner depends on which path executed the
+request.
 
-- **The regular path (a file)**: the script runs through
-  `php_execute_script()`. It calls the drain itself (line 2683) and right
-  after it reports whatever is left in EG (2697). There is an owner — the
-  chain is closed.
-- **The `php -r` / embed path**: the code runs through
-  `zend_eval_string()`, bypassing `php_execute_script()` — no drain and no
-  report there. The first (and only) drain for such a request happens right
-  here, in `php_request_shutdown()`. If this drain puts an exception into
-  EG (in TrueAsync — a DeadlockError after a deadlock; in our case — e.g. a
+- **The regular path (a file).** The script runs through
+  `php_execute_script()`, which calls the drain itself (2683) and right
+  after reports whatever is left in EG (2697). There is an owner; the chain
+  is closed.
+- **The `php -r` / embed path.** The code runs through
+  `zend_eval_string()`, bypassing `php_execute_script()`, so neither the
+  drain nor the report happens there. The first and only drain for such a
+  request happens right here, in `php_request_shutdown()`. If it puts an
+  exception into EG (in TrueAsync a DeadlockError; in our case e.g. a
   failure to recreate the loop), nothing further down the function ever
   reads EG(exception): the next step is `ZEND_ASYNC_DEACTIVATE` and the
   ordinary shutdown. The exception is neither caught nor reported, the
-  object is never released → the user sees no fatal error, and a debug
-  build prints "Freeing 0x... (152 bytes)" on exit — a leak.
+  object is never released, the user sees no fatal error, and a debug build
+  prints "Freeing 0x... (152 bytes)" on exit. A leak.
 
-The guard at 2004 closes the chain for the second path: report + release,
-exactly the way `php_execute_script()` does it for the first one. For
+The guard at 2004 closes the chain for the second path with the same
+report-and-release `php_execute_script()` performs for the first one. For
 requests that arrive here with a clean EG (the norm) it is a no-op.
 
-### main.c:2010 — `php_request_shutdown()`: `ZEND_ASYNC_DEACTIVATE`
+### main.c:2010, `php_request_shutdown()`: `ZEND_ASYNC_DEACTIVATE`
 
-What: the point after which everything runs synchronously. The single
-deactivation point for the whole request.
-Why: what follows is output buffer flushing, module RSHUTDOWN, object
-store destruction — no coroutines may exist there.
+The point after which everything runs synchronously; the single
+deactivation point for the whole request. What follows is output buffer
+flushing, module RSHUTDOWN and object store destruction, where no
+coroutines may exist.
 
-### main.c:2583 — `php_module_shutdown()`: `zend_async_api_shutdown()`
+### main.c:2583, `php_module_shutdown()`: `zend_async_api_shutdown()`
 
-What: zeroes out all registered API slots when the modules are unloaded.
-Why: the extension is being unloaded — no pointer may outlive it.
-
----
-
-## Zend/zend.c:1983 — `zend_execute_script()`: deferred uncaught report
-
-What: an uncaught exception after `zend_execute()` is reported as a fatal
-immediately **only if** `ZEND_ASYNC_CURRENT_COROUTINE == NULL`.
-Why: when the script is the main coroutine, an immediate fatal would kill
-the request before the drain — the remaining coroutines would never run
-their finally blocks. Instead, the exception stays in EG(exception), rides
-down to `RUN_SCHEDULER_AFTER_MAIN` in `php_execute_script`, takes part in
-the drain (gets folded into the exit chain) and is reported once, at the
-end.
+Zeroes out all registered API slots when the modules are unloaded. The
+extension is going away; no pointer may outlive it.
 
 ---
 
-## Zend/zend_globals.h:171-196 — `zend_shutdown_context_t` in EG
+## Zend/zend.c:1983, `zend_execute_script()`: deferred uncaught report
 
-What: a small cursor struct {is_started, coroutine, idx} in the executor
-globals. Shared by the two shutdown destructor passes
-(`shutdown_destructors()` and the object-store pass) — they run strictly
-one after the other.
-Why: if a destructor suspends in the middle of a pass, the pass must
-continue from the same spot, but in a fresh coroutine. The cursor is core
-state, so it lives in EG, not in the extension.
+An uncaught exception after `zend_execute()` is reported as a fatal
+immediately **only if** `ZEND_ASYNC_CURRENT_COROUTINE == NULL`. When the
+script is the main coroutine, an immediate fatal would kill the request
+before the drain and the remaining coroutines would never run their finally
+blocks. Instead the exception stays in EG(exception), rides down to
+`RUN_SCHEDULER_AFTER_MAIN` in `php_execute_script`, takes part in the drain
+(folded into the exit chain) and is reported once, at the end.
 
 ---
 
-## Zend/zend_execute_API.c — `shutdown_destructors()` (the symbol table)
+## Zend/zend_globals.h:171-196: `zend_shutdown_context_t` in EG
 
-### zend_execute_API.c:284-288 — subscribing the switch handler
+A small cursor struct {is_started, coroutine, idx} in the executor globals,
+shared by the two shutdown destructor passes (`shutdown_destructors()` and
+the object-store pass), which run strictly one after the other. If a
+destructor suspends in the middle of a pass, the pass must continue from
+the same spot, but in a fresh coroutine. The cursor is core state, so it
+lives in EG, not in the extension.
 
-What: if the pass runs inside a coroutine, a
+---
+
+## Zend/zend_execute_API.c: `shutdown_destructors()` (the symbol table)
+
+### zend_execute_API.c:284-288: subscribing the switch handler
+
+If the pass runs inside a coroutine, a
 `shutdown_destructors_switch_handler` is attached to it via
-`ZEND_ASYNC_ADD_SWITCH_HANDLER`.
-Why: a destructor inside the pass may suspend. A microtask is no good
-here — this late in shutdown the next tick may never come; a hook on the
-context switch itself is the only synchronous moment where the suspend can
-be noticed.
+`ZEND_ASYNC_ADD_SWITCH_HANDLER`. A destructor inside the pass may suspend,
+and a microtask is no good here: this late in shutdown the next tick may
+never come. A hook on the context switch itself is the only synchronous
+moment where the suspend can be noticed.
 
-### zend_execute_API.c:260-280 — the switch handler spawns an iterator
+### zend_execute_API.c:260-280: the switch handler spawns an iterator
 
-What: on leaving the coroutine (is_enter=false), if the pass has started
-and is not finished, an internal iterator coroutine is created via
+On leaving the coroutine (is_enter=false), if the pass has started and is
+not finished, an internal iterator coroutine is created via
 `ZEND_ASYNC_GC_NEW_COROUTINE()` (its internal_entry continues the pass from
-EG(shutdown_context).idx) and enqueued.
-Why: a suspended destructor parks the pass's coroutine — the pass itself is
-carried on by an independent iterator. The handler returns false — it is
-one-shot.
+EG(shutdown_context).idx) and enqueued. A suspended destructor parks the
+pass's coroutine, so the pass itself is carried on by an independent
+iterator. The handler returns false: it is one-shot.
 
-### zend_execute_API.c:332-335 — suspend detection in the loop
+### zend_execute_API.c:332-335: suspend detection in the loop
 
-What: after each dtor, `coroutine != ZEND_ASYNC_CURRENT_COROUTINE` is
-checked — if the current coroutine changed, the pass breaks off (the
-spawned iterator will continue it).
+After each destructor the pass checks
+`coroutine != ZEND_ASYNC_CURRENT_COROUTINE`. If the current coroutine
+changed, the pass breaks off and the spawned iterator continues it.
 
 ---
 
-## Zend/zend_objects_API.c — the object store destructor pass
+## Zend/zend_objects_API.c: the object store destructor pass
 
-`zend_objects_store_call_destructors_async()` — the asynchronous variant of
-destroying the store's objects at shutdown. The same three-part scheme as
-in shutdown_destructors:
+`zend_objects_store_call_destructors_async()` is the asynchronous variant
+of destroying the store's objects at shutdown, built on the same
+three-part scheme as shutdown_destructors:
 
-### zend_objects_API.c:123-128 — switch handler on the current coroutine
-### zend_objects_API.c:93-113 — spawning an iterator coroutine on suspend
-### zend_objects_API.c:158-160 — breaking the loop when the coroutine changes
+- zend_objects_API.c:123-128: switch handler on the current coroutine;
+- zend_objects_API.c:93-113: spawning an iterator coroutine on suspend;
+- zend_objects_API.c:158-160: breaking the loop when the coroutine changes.
 
-The special part — zend_objects_API.c:142-151: **only while a scheduler is
+The special part (zend_objects_API.c:142-151): **only while a scheduler is
 active** the pass skips live fibers (`zend_ce_fiber`) and objects of the
-coroutine class (`ZEND_ASYNC_GET_CE(ZEND_ASYNC_CLASS_COROUTINE)`).
-Why: a destructor may spawn a fiber and wait for it; destroying that parked
+coroutine class (`ZEND_ASYNC_GET_CE(ZEND_ASYNC_CLASS_COROUTINE)`). A
+destructor may spawn a fiber and wait for it, and destroying that parked
 fiber out from under the waiting destructor would break the destructor
-itself. These objects are picked up later, by the drain. Without a
-scheduler the skip must NOT apply — the upstream contract relies on the
-dtor pass force-closing parked fibers (the legacy GC destructor fiber is
-released exactly this way; an unconditional skip leaked it).
+itself; the drain picks these objects up later. Without a scheduler the
+skip must NOT apply: the upstream contract relies on the destructor pass
+force-closing parked fibers. The legacy GC destructor fiber is released
+exactly this way, and an unconditional skip leaked it.
 
 ---
 
-## Zend/zend_fibers.h / zend_fibers.c — fibers as coroutines
+## Zend/zend_fibers.h / zend_fibers.c: fibers as coroutines
 
-The idea: with an active scheduler, every starting `Fiber` is **adopted** —
-its body runs as a coroutine of that scheduler, while the Fiber object
-remains a facade. Without a scheduler — the legacy path, byte-for-byte the
-old behavior.
+The idea: with an active scheduler, every starting `Fiber` is **adopted**.
+Its body runs as a coroutine of that scheduler while the Fiber object
+remains a facade. Without a scheduler the legacy path applies,
+byte-for-byte the old behavior.
 
-### zend_fibers.h:147-154 — the fields in `struct _zend_fiber`
+### zend_fibers.h:147-154: the fields in `struct _zend_fiber`
 
-`zend_coroutine_t *coroutine` — the mode marker (NULL = legacy);
-`caller_coroutine` — who waits for a yield/finish; `zval transfer` — the
-value crossing the suspend/resume boundary. Ownership is one-way: the
-coroutine holds a reference to the fiber, the fiber holds none back (apart
-from a +1 on the coroutine's zend_object, see below), so no cycle is
+`zend_coroutine_t *coroutine` is the mode marker (NULL = legacy);
+`caller_coroutine` is who waits for a yield or finish; `zval transfer`
+carries the value across the suspend/resume boundary. Ownership is one-way:
+the coroutine holds a reference to the fiber, the fiber holds none back
+(apart from a +1 on the coroutine's zend_object, see below), so no cycle is
 created.
 
-### zend_fibers.c:971-1002 — `zend_fiber_adopt()`
+### zend_fibers.c:971-1002: `zend_fiber_adopt()`
 
-What: at fiber start the core offers it to the scheduler via
-`ZEND_ASYNC_INTERCEPT_FIBER(fiber)`. The scheduler answers with a coroutine
-(or NULL — "keep it", which is how a scheduler keeps its own fibers to
-itself). The coroutine gets `internal_entry = zend_fiber_coroutine_entry`,
-`extended_data = fiber`, the `ZEND_COROUTINE_SET_FIBER` flag; the fiber
+At fiber start the core offers it to the scheduler via
+`ZEND_ASYNC_INTERCEPT_FIBER(fiber)`. The scheduler answers with a coroutine,
+or with NULL ("keep it"), which is how a scheduler keeps its own fibers to
+itself. The coroutine gets `internal_entry = zend_fiber_coroutine_entry`,
+`extended_data = fiber` and the `ZEND_COROUTINE_SET_FIBER` flag; the fiber
 takes +1 on the coroutine's zend_object.
 
-### zend_fibers.c:1005-1022 — `zend_fiber_coroutine_start()`
+### zend_fibers.c:1005-1022: `zend_fiber_coroutine_start()`
 
-What: the fiber's body is packed into an fcall (`ZEND_ASYNC_FCALL_DEFINE`),
-the coroutine is enqueued (`ZEND_ASYNC_ENQUEUE_COROUTINE`), and the caller
+The fiber's body is packed into an fcall (`ZEND_ASYNC_FCALL_DEFINE`), the
+coroutine is enqueued (`ZEND_ASYNC_ENQUEUE_COROUTINE`), and the caller
 waits for the first yield via `zend_fiber_await()`.
 
-### zend_fibers.c:917-966 — `zend_fiber_await()`
+### zend_fibers.c:917-966: `zend_fiber_await()`
 
-What: the caller records itself in `fiber->caller_coroutine` and parks with
-`ZEND_ASYNC_SUSPEND()`. An error/cancellation while parking → FAILURE, with
-the prev_execute_data chain severed (otherwise GC walks a dead frame).
-Self-await is caught before parking.
+The caller records itself in `fiber->caller_coroutine` and parks with
+`ZEND_ASYNC_SUSPEND()`. An error or cancellation while parking yields
+FAILURE, with the prev_execute_data chain severed (otherwise GC walks a
+dead frame). Self-await is caught before parking.
 
-### zend_fibers.c:869-913 — `zend_fiber_coroutine_yield()` (Fiber::suspend)
+### zend_fibers.c:869-913: `zend_fiber_coroutine_yield()` (Fiber::suspend)
 
-What: the value goes into `fiber->transfer`, the caller is woken with
-`ZEND_ASYNC_ENQUEUE_COROUTINE`, the fiber itself parks with `ZEND_ASYNC_SUSPEND()`.
-After waking up, the fiber re-reads `coroutine->extended_data`: while it
-slept, the Fiber object may have been force-closed — then extended_data is
-already NULL and a graceful exit flies out.
+The value goes into `fiber->transfer`, the caller is woken with
+`ZEND_ASYNC_ENQUEUE_COROUTINE`, and the fiber parks with
+`ZEND_ASYNC_SUSPEND()`. After waking up, the fiber re-reads
+`coroutine->extended_data`: while it slept, the Fiber object may have been
+force-closed, in which case extended_data is already NULL and a graceful
+exit flies out.
 
-### zend_fibers.c:840-867 — the body finishing (`zend_fiber_coroutine_entry` tail)
+### zend_fibers.c:840-867: the body finishing (`zend_fiber_coroutine_entry` tail)
 
-What: an exception that escaped the body is delivered to the caller with
-`ZEND_ASYNC_ENQUEUE_WITH_ERROR` (ownership is transferred); a normal finish —
-`ZEND_ASYNC_ENQUEUE_COROUTINE(caller)`.
+An exception that escaped the body is delivered to the caller with
+`ZEND_ASYNC_ENQUEUE_WITH_ERROR` (ownership is transferred); a normal finish
+wakes the caller with `ZEND_ASYNC_ENQUEUE_COROUTINE`.
 
-### zend_fibers.c:1312-1335 — `Fiber::suspend()` (userland)
+### zend_fibers.c:1312-1335: `Fiber::suspend()` (userland)
 
-What: dispatch on the current coroutine: if there is one and it is a fiber
-coroutine — yield through the scheduler; not a fiber — FiberError "Cannot
+Dispatch on the current coroutine. If there is one and it is a fiber
+coroutine, yield through the scheduler; not a fiber, FiberError "Cannot
 suspend outside of a fiber"; force-closed or cancelled
-(`ZEND_COROUTINE_IS_CANCELLED`) — FiberError "Cannot suspend in a
+(`ZEND_COROUTINE_IS_CANCELLED`), FiberError "Cannot suspend in a
 force-closed fiber". A legacy fiber (active with no coroutine) takes the
 old path.
 
-### zend_fibers.c:1385-1398 / 1429 — `Fiber::resume()` / `Fiber::throw()`
+### zend_fibers.c:1385-1398 / 1429: `Fiber::resume()` / `Fiber::throw()`
 
-What: in coroutine mode — `ZEND_ASYNC_ENQUEUE_COROUTINE` /
-`ZEND_ASYNC_ENQUEUE_WITH_ERROR` + `zend_fiber_await()` instead of a direct
-context switch.
+In coroutine mode: `ZEND_ASYNC_ENQUEUE_COROUTINE` /
+`ZEND_ASYNC_ENQUEUE_WITH_ERROR` plus `zend_fiber_await()` instead of a
+direct context switch.
 
-### zend_fibers.c:752-773 — `zend_fiber_release_coroutine()`
+### zend_fibers.c:752-773: `zend_fiber_release_coroutine()`
 
-What: when the Fiber object dies before its coroutine, the unfinished
-coroutine is force-closed: `ZEND_ASYNC_CANCEL(coroutine, graceful_exit,
-true)`. Idempotence of a repeated cancel is the scheduler's duty (the first
-graceful exit wins).
+When the Fiber object dies before its coroutine, the unfinished coroutine
+is force-closed: `ZEND_ASYNC_CANCEL(coroutine, graceful_exit, true)`.
+Idempotence of a repeated cancel is the scheduler's duty; the first
+graceful exit wins.
 
-### zend_fibers.c — `zend_fiber_object_gc()`
+### zend_fibers.c: `zend_fiber_object_gc()`
 
-What: three states of a coroutine-mode fiber, three policies:
-- **running or awaiting inside the body** — a GC root: nothing is exposed.
-  The stack is mid-operation; scanning it miscounts refcounts over a
+Three states of a coroutine-mode fiber, three policies:
+
+- **Running, or awaiting inside the body.** A GC root: nothing is exposed.
+  The stack is mid-operation, and scanning it miscounts refcounts over a
   half-unwound frame (the gh10496 crash).
-- **parked at a clean `Fiber::suspend()`** — fci/transfer are exposed and
-  the frames of the parked stack are walked (`zend_fiber_frames_gc`,
-  shared with the legacy path, generator frames included via
+- **Parked at a clean `Fiber::suspend()`.** fci/transfer are exposed and
+  the frames of the parked stack are walked (`zend_fiber_frames_gc`, shared
+  with the legacy path; generator frames included via
   `zend_generator_frame_gc`). This is the analog of TrueAsync's
   `ZEND_COROUTINE_F_YIELD`-gated walk; our yield marker is
   `fiber->context.status`, which only the yield path touches. It is what
-  lets an abandoned yielded fiber — and a generator parked on its stack —
-  collect before shutdown (upstream gh9735/gh10340 contract).
-- **finished** — fci/result/transfer and the edge to the coroutine's
-  zend_object are exposed. The edge is mandatory — without it, the
-  fiber→coroutine→fcall→closure→fiber cycle was never collected (the
-  gh9916 leak).
+  lets an abandoned yielded fiber, and a generator parked on its stack,
+  collect before shutdown (the upstream gh9735/gh10340 contract).
+- **Finished.** fci/result/transfer and the edge to the coroutine's
+  zend_object are exposed. The edge is mandatory: without it the
+  fiber→coroutine→fcall→closure→fiber cycle was never collected (the gh9916
+  leak).
 
 The coroutine object itself is never put into the buffer while unfinished:
 the scheduler holds references GC cannot see. To make the walk safe, the
-yield path severs `stack_bottom->prev_execute_data` **before** parking —
-the walked chain must end at the fiber's own root frame, not run on into
-the caller's live frames.
+yield path severs `stack_bottom->prev_execute_data` **before** parking, so
+the walked chain ends at the fiber's own root frame instead of running on
+into the caller's live frames.
 
-### zend_fibers.c — `zend_fiber_vm_stack_start()` / `zend_fiber_vm_stack_free()`
+### zend_fibers.c: `zend_fiber_vm_stack_start()` / `zend_fiber_vm_stack_free()`
 
-What: the VM-stack setup/teardown of a fiber body, factored out and exported
-(`ZEND_API`): the legacy `zend_fiber_execute` and the PHP bridge's
-`Async\Continuation` bodies run on stacks installed by the same helper.
-Inside it — the error_reporting fix: an empty ini string is treated as "not
-set" → E_ALL. Why: the Windows CLI leaves the ini as an empty string (not
-NULL) — the old fallback never fired and all uncaught exceptions inside
-fibers/coroutines vanished silently. A latent upstream bug, fixed for both
-paths (legacy and coroutine).
+The VM-stack setup and teardown of a fiber body, factored out and exported
+(`ZEND_API`): the legacy `zend_fiber_execute` and the bridge extension's
+coroutine bodies run on stacks installed by the same helper. Inside it
+lives the error_reporting fix: an empty ini string is treated as "not set"
+and falls back to E_ALL. The Windows CLI leaves the ini as an empty string
+(not NULL), so the old fallback never fired and all uncaught exceptions
+inside fibers and coroutines vanished silently. A latent upstream bug,
+fixed for both paths.
 
 ---
 
-# GC — Zend/zend_gc.c (its own chapter)
+# GC: Zend/zend_gc.c (its own chapter)
 
 Context: `zend_gc_collect_cycles()` must stay **synchronous** for the
 caller (the userland `gc_collect_cycles()` contract), yet destructors may
-suspend. The solution — the collection runs in a dedicated GC coroutine and
+suspend. The solution: the collection runs in a dedicated GC coroutine and
 the caller parks until it finishes; the destructor phase is one more layer
-of coroutines. This is a deliberate departure from TrueAsync (whose async
-GC returns 0 immediately).
+of coroutines. This is a deliberate departure from TrueAsync, whose async
+GC returns 0 immediately.
 
 ## The state (GC_G, zend_gc.c:300 and nearby)
 
-- `gc_coroutine` — the coroutine of the current GC run;
-- `dtor_coroutine` — the current iterator of the destructor phase;
-- `dtor_pending` — the count of unfinished iterators;
-- `microtask` (zend_gc.c:300) — the re-arming microtask that spawns the
-  next iterator;
-- `dtor_idx`/`dtor_end` — the cursor over the garbage buffer;
-- `gc_collected` — the result for whoever waits.
+- `gc_coroutine`: the coroutine of the current GC run;
+- `dtor_coroutine`: the current iterator of the destructor phase;
+- `dtor_pending`: the count of unfinished iterators;
+- `microtask`: the re-arming microtask that spawns the next iterator;
+- `dtor_idx`/`dtor_end`: the cursor over the garbage buffer;
+- `gc_collected`: the result for whoever waits.
 
-## zend_gc.c:2201-2237 — `zend_gc_collect_cycles()`: the synchronous wrapper
+## zend_gc.c:2201-2237, `zend_gc_collect_cycles()`: the synchronous wrapper
 
-What: if async is active and the caller is not the GC coroutine:
-- a reentrant call while `gc_active` → 0 (deadlock protection: an await
-  from inside the destructor phase would wait for itself — the gc_016
+If async is active and the caller is not the GC coroutine:
+
+- a reentrant call while `gc_active` returns 0 (deadlock protection: an
+  await from inside the destructor phase would wait for itself, the gc_016
   crash);
-- `zend_gc_remove_root_tmpvars()` before parking: the run executes on a
-  foreign stack and **cannot see** the caller's live TMPVARs — they must be
-  shielded (gc_047, bug80072);
-- if there is no GC coroutine — `new_gc_coroutine()`:
-  `ZEND_ASYNC_GC_NEW_COROUTINE()` + enqueue, the body is
+- `zend_gc_remove_root_tmpvars()` runs before parking: the run executes on
+  a foreign stack and **cannot see** the caller's live TMPVARs, so they
+  must be shielded (gc_047, bug80072);
+- if there is no GC coroutine, `new_gc_coroutine()` creates one:
+  `ZEND_ASYNC_GC_NEW_COROUTINE()` plus enqueue, the body is
   `zend_gc_coroutine()`;
-- the caller blocks in `ZEND_ASYNC_AWAIT(GC_G(gc_coroutine))` — the wait
-  list lives on the coroutine itself, no global waiter lists. false = the
-  caller was cancelled, not "GC broke";
-- the TMPVARs are re-rooted **on both outcomes** — after a normal wake-up
-  and when the waiter was cancelled (otherwise the removed roots fall out
-  of GC tracking forever — a silent leak; closed by the 2026-07-15 review,
+- the caller blocks in `ZEND_ASYNC_AWAIT(GC_G(gc_coroutine))`. The wait
+  list lives on the coroutine itself; there are no global waiter lists.
+  false means the caller was cancelled, not that GC broke;
+- the TMPVARs are re-rooted **on both outcomes**, after a normal wake-up
+  and when the waiter was cancelled. Otherwise the removed roots fall out
+  of GC tracking forever, a silent leak (closed by the 2026-07-15 review,
   test 020_gc_await_cancel).
 
 Why `ZEND_ASYNC_GC_NEW_COROUTINE` rather than a plain one: a scheduler may
@@ -367,115 +363,114 @@ The scheme (the header comment at zend_gc.c:2019-2036):
    `dtor_idx`/`dtor_end` cursor, spawns the first iterator and parks the GC
    coroutine with `ZEND_ASYNC_SUSPEND()`.
 2. `gc_spawn_destructors_coroutine()` (2121-2152): a service coroutine with
-   `internal_entry = gc_destructors_coroutine`, `dtor_pending++`, and — the
-   key part — a **finish handler** `gc_destructors_finish_handler` via
-   `ZEND_ASYNC_ADD_FINISH_HANDLER(coroutine, handler,
-   GC_G(gc_coroutine), NULL)` (2134). The waiter here is diagnostic; the
+   `internal_entry = gc_destructors_coroutine`, `dtor_pending++`, and the
+   key part, a **finish handler** `gc_destructors_finish_handler`
+   registered via `ZEND_ASYNC_ADD_FINISH_HANDLER(coroutine, handler,
+   GC_G(gc_coroutine), NULL)` (2134). The waiter there is diagnostic; the
    handler itself works off GC_G. A failed handler registration
-   (`handler_id == 0`) or a failed enqueue (2139) takes a common rollback:
-   the handler is removed, the counter and `dtor_coroutine` are restored —
+   (`handler_id == 0`) or a failed enqueue (2139) takes a common rollback
+   that removes the handler and restores the counter and `dtor_coroutine`;
    otherwise either the coroutine's end would decrement the counter a
-   second time, or nobody would ever decrement it at all (GC would hang).
-3. `gc_destructors_coroutine()` (2103-2119): arms the microtask, drives
+   second time, or nobody would ever decrement it at all and GC would hang.
+3. `gc_destructors_coroutine()` (2103-2119) arms the microtask and drives
    `gc_call_destructors`. If a destructor suspended and the microtask has
-   already spawned a successor (`dtor_coroutine != CURRENT`) — it quietly
-   exits; if it reached the end on its own — it disarms the microtask.
-4. The microtask `gc_destructors_iterator_microtask` (2060-2065): on the
-   next tick spawns a fresh iterator from the current `dtor_idx`
-   (destructors already run are skipped via IS_OBJ_DESTRUCTOR_CALLED).
-   Arming/disarming — 2074-2101 (`gc_arm_iterator_microtask` /
-   `gc_disarm_iterator_microtask`, refcounting via
+   already spawned a successor (`dtor_coroutine != CURRENT`), it quietly
+   exits; if it reached the end on its own, it disarms the microtask.
+4. The microtask `gc_destructors_iterator_microtask` (2060-2065) spawns a
+   fresh iterator on the next tick from the current `dtor_idx` (destructors
+   already run are skipped via IS_OBJ_DESTRUCTOR_CALLED). Arming and
+   disarming live at 2074-2101, refcounting via
    `ZEND_ASYNC_MICROTASK_ADDREF/RELEASE`, scheduling via
-   `ZEND_ASYNC_DEFER`).
-5. `gc_destructors_finish_handler` (2043-2058): fires exactly once at the
-   end of **every** iterator (bailout unwinds included — the finish handler
-   contract): `dtor_pending--`; at zero — `dtor_coroutine = NULL` and, if
-   not a bailout, `ZEND_ASYNC_ENQUEUE_COROUTINE(GC_G(gc_coroutine))` — the
-   GC coroutine wakes up and continues the collection. On a bailout there
-   is nobody left to wake, but the counter and the globals stay clean.
+   `ZEND_ASYNC_DEFER`.
+5. `gc_destructors_finish_handler` (2043-2058) fires exactly once at the
+   end of **every** iterator, bailout unwinds included (the finish handler
+   contract): `dtor_pending--`; at zero, `dtor_coroutine = NULL` and, if
+   not a bailout, `ZEND_ASYNC_ENQUEUE_COROUTINE(GC_G(gc_coroutine))` wakes
+   the GC coroutine to continue the collection. On a bailout there is
+   nobody left to wake, but the counter and the globals stay clean.
 
 Why all this complexity: a destructor that suspends forever (waiting for an
-event) must not hang GC. Every suspend gives birth to a new iterator; GC
-waits until **all** of them finish (dtor_pending), including the ones that
-came back from a suspend.
+event) must not hang GC. Every suspend gives birth to a new iterator, and
+GC waits until **all** of them finish (dtor_pending), including the ones
+that came back from a suspend.
 
-## zend_gc.c:1885-1932 — `gc_call_destructors()`: suspend detection
+## zend_gc.c:1885-1932, `gc_call_destructors()`: suspend detection
 
-What: before each dtor the cursor is persisted into `GC_G(dtor_idx)`;
-after it — the `coroutine != ZEND_ASYNC_CURRENT_COROUTINE` check (1918):
-the coroutine changed → the destructor suspended → the iterator breaks off
-(the object goes back into the possible roots); the continuation is the
+Before each destructor the cursor is persisted into `GC_G(dtor_idx)`; after
+it comes the `coroutine != ZEND_ASYNC_CURRENT_COROUTINE` check (1918). If
+the coroutine changed, the destructor suspended: the iterator breaks off
+(the object goes back into the possible roots) and the continuation is the
 microtask's business. Symmetric to the old fiber detection (1913,
 `dtor_fiber`).
 
-## zend_gc.c:2339-2352 — handling the destructor phase outcome
+## zend_gc.c:2339-2352: handling the destructor phase outcome
 
-What: `gc_call_destructors_in_coroutine()` returned false (the parking
-fell through) — the GC rerun is cancelled **unconditionally**
+When `gc_call_destructors_in_coroutine()` returns false (the parking fell
+through), the GC rerun is cancelled **unconditionally**
 (`should_rerun_gc = false`, 2344): a cancelled GC coroutine cannot park
 again, and a rerun would only spawn an orphan iterator over an
-already-reset buffer (a UAF risk; closed by the 2026-07-15 review, test
+already-reset buffer, a UAF risk (closed by the 2026-07-15 review, test
 021_gc_deadlock). If EG(exception) is an instance of
-`ZEND_ASYNC_GET_EXCEPTION_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION)` (the
-cancellation class the scheduler provides), it is additionally silenced:
-the GC coroutine was cancelled (e.g. a terminal deadlock) — that is not a
-GC error. Then the GC_DTOR_GARBAGE tags left behind by the unfinished
-iterator are cleaned up.
+`ZEND_ASYNC_GET_EXCEPTION_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION)`, the
+cancellation class the scheduler provides, it is additionally silenced: the
+GC coroutine was cancelled (e.g. a terminal deadlock), and that is not a GC
+error. Then the GC_DTOR_GARBAGE tags left behind by the unfinished iterator
+are cleaned up.
 
-This is the only place in the core that uses
-`ZEND_ASYNC_GET_EXCEPTION_CE` — the core needs the cancellation exception
-class without knowing its name.
+This is the only place in the core that uses `ZEND_ASYNC_GET_EXCEPTION_CE`:
+the core needs the cancellation exception class without knowing its name.
 
-## Parked coroutine stacks (the former "theoretical hole" — resolved as a non-issue)
+## Parked coroutine stacks (the former "theoretical hole", resolved as a non-issue)
 
-References held by the frames of an await-parked coroutine (live
-temporaries included) are invisible to the cycle collector — and that is
-safe by construction, on two grounds:
+References held by the frames of an await-parked coroutine, live
+temporaries included, are invisible to the cycle collector. That is safe by
+construction, on two grounds:
 
 1. Trial deletion is conservative: it only frees objects whose refcount it
    can fully explain through visible edges. A reference from an invisible
    frame slot leaves the refcount unexplained, so the object is always
-   kept — a premature free is impossible.
-2. Exposing the frame edges cannot enable any collection either: the
+   kept; a premature free is impossible.
+2. Exposing the frame edges cannot enable any collection either. The
    scheduler's live table anchors every parked coroutine with a reference
-   GC cannot see, so the coroutine — and everything its frames hold — is
-   externally rooted until it finishes; force-close at shutdown unwinds
-   the frames and releases the values.
+   GC cannot see, so the coroutine and everything its frames hold stays
+   externally rooted until it finishes; force-close at shutdown unwinds the
+   frames and releases the values.
 
 This was verified empirically: a full frame walk from the coroutine's
-get_gc (CVs, in-flight call args, live-range temporaries — the helper and
-a WeakReference-instrumented probe) produced zero observable difference in
-any scenario, so the walk was not merged. The net effect of invisibility
-is at most a deferred collection (until the value is consumed or the
-request ends), never a leak across the request and never a use-after-free.
-Yielded fiber stacks are different — there the fiber object is not
-scheduler-anchored, the walk is observable (gh9735), and it is
-implemented; see `zend_fiber_object_gc()` above.
+get_gc (CVs, in-flight call args, live-range temporaries; the helper plus a
+WeakReference-instrumented probe) produced zero observable difference in
+any scenario, so the walk was not merged. The net effect of invisibility is
+at most a deferred collection (until the value is consumed or the request
+ends), never a leak across the request and never a use-after-free. Yielded
+fiber stacks are different: there the fiber object is not
+scheduler-anchored, the walk is observable (gh9735), and it is implemented;
+see `zend_fiber_object_gc()` above.
 
 ---
 
-## The coroutine context — Zend/zend_async_API.h/.c
+## The coroutine context: Zend/zend_async_API.h/.c
 
-Coroutine-local storage is engine machinery, not scheduling policy; both
-stores live on `zend_coroutine_t`, and the core owns the layout and the
-operations. The engine registers no PHP class and zend.c carries no wiring.
+Coroutine-local storage is engine machinery, not scheduling policy. Both
+stores live on `zend_coroutine_t`, the core owns the layout and the
+operations, the engine registers no PHP class, and zend.c carries no
+wiring.
 
 **The internal context** (C extensions only, structurally unreachable from
-PHP): a HashTable **embedded by value** in the coroutine — `zend_hash_init`
+PHP) is a HashTable **embedded by value** in the coroutine. `zend_hash_init`
 defers the bucket array to the first insert, so an unused context costs
-nothing and the lazy-pointer allocation is gone. The provider calls
+nothing, and the lazy-pointer allocation is gone. The provider calls
 `zend_async_internal_context_init/destroy` at the coroutine's birth and
 death. Keys are process-unique numbers allocated once per process from a
 static C-string name (`zend_async_internal_context_key_alloc`, typically at
-MINIT): the registry is deliberately a process-global static behind a ZTS
-mutex — a key must mean the same thing in every thread and request — and a
-repeated alloc with the same string address returns the same key.
-`zend_async_scheduler_unregister()` (a per-request event for the PHP
-bridge) does NOT touch the registry; only the process shutdown does.
+MINIT). The registry is deliberately a process-global static behind a ZTS
+mutex, because a key must mean the same thing in every thread and request;
+a repeated alloc with the same string address returns the same key.
+`zend_async_scheduler_unregister()`, a per-request event for the PHP
+bridge, does not touch the registry; only the process shutdown does.
 
 **The userland context** (`Async\Context`): the core defines a plain C
-struct — `zend_async_context_t { HashTable string_keys; HashTable
-object_keys; zend_object std; }` — plus the operations over it
+struct, `zend_async_context_t { HashTable string_keys; HashTable
+object_keys; zend_object std; }`, plus the operations over it
 (`tables_init/destroy`, `entry_find/set/unset/gc`) and the coroutine-level
 view (`zend_async_context_get/find/set/unset/destroy`). `std` sits at a
 fixed offset inside the base, so `ZEND_ASYNC_CONTEXT_FROM_OBJ` is a
@@ -486,14 +481,13 @@ provider extension, which hands the core its factory through the
 as well as the value: handles are reused once an object dies, and a stored
 key that outlived its object would alias whatever takes its handle next.
 
-There is no request-level store: no coroutine — no context.
-`get_context()` without a running scheduler is an `Error`. The main
-coroutine exists from the launch on, so the script's store is simply the
-main coroutine's store.
+There is no request-level store: no coroutine, no context. `get_context()`
+without a running scheduler is an `Error`. The main coroutine exists from
+the launch on, so the script's store is simply the main coroutine's store.
 
 ---
 
-## ext/async_scheduler_hook — the PHP registration bridge
+## ext/async_scheduler_hook: the PHP registration bridge
 
 The userland face of the hook layer, an optional in-tree extension
 (`--enable-async-scheduler-hook`, static or shared):
@@ -502,54 +496,56 @@ The userland face of the hook layer, an optional in-tree extension
 the `Async\Context` / `Async\get_context()` surface over the engine's
 context storage. Each engine slot is backed by a C thunk that forwards to
 the bound scheduler method. The extension talks to the engine exclusively
-through exported `ZEND_API` — the runtime proof that the ABI seam is
-sufficient for a PHP-facing provider.
+through exported `ZEND_API`, which is the runtime proof that the ABI seam
+is sufficient for a PHP-facing provider.
 
 The lifecycle maps onto the standard module hooks, which bracket the
-executor shutdown exactly as the teardown needs: MINIT registers the
-classes and the context factory; RSHUTDOWN (runs before
-`shutdown_executor()`) drops the handler container — it owns objects the
-store would otherwise report as leaked — and unregisters the scheduler;
-`ZEND_MODULE_POST_ZEND_DEACTIVATE` (runs after) sweeps the coroutine-handle
-map, once every coroutine object has taken its handle with it.
+executor shutdown exactly as the teardown needs. MINIT registers the
+classes and the context factory. RSHUTDOWN, which runs before
+`shutdown_executor()`, drops the handler container (it owns objects the
+store would otherwise report as leaked) and unregisters the scheduler.
+`ZEND_MODULE_POST_ZEND_DEACTIVATE`, which runs after, sweeps the
+coroutine-handle map, once every coroutine object has taken its handle with
+it.
 
 The model is coroutine-centric: everything is keyed by the scheduler's own
-coroutine objects, and the execution context behind one is engine-internal —
-there is NO public Continuation. The mandate is three real closures over
-internal functions registered in no function table (only the factory ever
-receives them, so the capability cannot leak):
+coroutine objects, and the execution context behind one is engine-internal.
+There is no public Continuation. The mandate is three real closures over
+internal functions registered in no function table; only the factory ever
+receives them, so the capability cannot leak:
 
-- `bindEntry(object $coroutine, callable $entry): void` — a body for one of
-  the scheduler's own coroutines;
+- `bindEntry(object $coroutine, callable $entry): void` gives one of the
+  scheduler's own coroutines its body;
 - `switchTo(object $coroutine, mixed $value = null, ?Throwable $error =
-  null): mixed` — the one symmetric switch path: main, adopted fibers (the
+  null): mixed` is the one symmetric switch path: main, adopted fibers (the
   engine runs their C bodies itself) and the scheduler's own coroutines
-  alike; value/error ride the RFC transfer contract, completion returns to
-  the LAST switcher;
+  alike. Value and error ride the RFC transfer contract; completion returns
+  to the last switcher;
 - `currentCoroutine(): ?object`.
 
 Contract points implemented here:
 
 - **onLaunch** returns the main coroutine (main is a coroutine from its
-  first opcode); its handle borrows the engine's own context — switching
+  first opcode). Its handle borrows the engine's own context, so switching
   into main wakes the script wherever it parked.
-- **The end-of-main handover replaces the main**: `onSuspend(fromMain:
+- **The end-of-main handover replaces the main.** `onSuspend(fromMain:
   true)` marks the old main FINISHED (index.php really ended) and must
-  return a fresh main coroutine, recorded as the new main + current;
-  returning the finished main is an Error. Two handovers per request.
-- **no onWaitInfo** (awaiting-info vector), **no onResume** (enqueue and
-  resume are one hook; cancel is the same hook with an error).
+  return a fresh main coroutine, recorded as the new main and the current
+  one; returning the finished main is an Error. Two handovers per request.
+- **No onWaitInfo** (the awaiting-info vector took its place) and **no
+  onResume** (enqueue and resume are one hook; cancel is the same hook with
+  an error).
 
-Mechanics worth knowing: the bridge mints a C-visible `zend_coroutine_t`
-handle per coroutine object (`ZEND_COROUTINE_F_OBJ_REF` — the handle lives
+Mechanics worth knowing. The bridge mints a C-visible `zend_coroutine_t`
+handle per coroutine object (`ZEND_COROUTINE_F_OBJ_REF`: the handle lives
 in its own allocation and points at the object); the handle dies with the
-object through a wrapped `free_obj`, and it also carries the context, the
-bound entry and the pending error. The engine learns the current coroutine
-only from the return value of onLaunch/onSuspend — plus the flow identity is
-restored after every switchTo returns, so `currentCoroutine()` is always
-honest. A non-Throwable error (the graceful/unwind exit markers) cannot
-cross the PHP hook boundary: it parks on the handle and the suspend thunk
-throws it C-side.
+object through a wrapped `free_obj`, and it also carries the execution
+context, the bound entry and the pending error. The engine learns the
+current coroutine only from the return value of onLaunch/onSuspend, and the
+flow identity is restored after every switchTo returns, so
+`currentCoroutine()` is always honest. A non-Throwable error (the
+graceful/unwind exit markers) cannot cross the PHP hook boundary: it parks
+on the handle and the suspend thunk throws it C-side.
 
 ---
 
@@ -557,15 +553,15 @@ throws it C-side.
 
 - test_scheduler is gated by `test_scheduler.enable` (PHP_INI_SYSTEM,
   default **0**): the extension loads but claims no scheduler slots unless
-  enabled. The process-wide slot stays free by default.
-- **Upstream core tests are untouched** (Zend/tests/fibers, gc, generators
-  carry upstream content byte-for-byte) and run schedulerless — they verify
-  RFC goal #3, "with no scheduler registered, PHP behaves exactly as
-  today".
+  enabled, so the process-wide slot stays free by default.
+- **Upstream core tests are untouched.** Zend/tests/fibers, gc and
+  generators carry upstream content byte-for-byte and run schedulerless,
+  verifying RFC goal #3: with no scheduler registered, PHP behaves exactly
+  as today.
 - Tests whose behaviour legitimately differs under a scheduler are
   **duplicated** into ext/test_scheduler/tests (026-059, descriptive names)
   with `--INI-- test_scheduler.enable=1` and the scheduler-adapted EXPECTs.
-- The bridge and context tests live in ext/async_scheduler_hook/tests; they
+- The bridge and context tests live in ext/async_scheduler_hook/tests. They
   register a PHP scheduler, and a SKIPIF guards against a binary where a C
   scheduler already took the slot.
 
@@ -589,7 +585,7 @@ throws it C-side.
 | ext/test_scheduler | — | the C reference scheduler (test_scheduler.enable, default off) |
 | Zend/zend_fibers.h | 147-154 | coroutine-mode fields in zend_fiber |
 | Zend/zend_fibers.c | 971-1022 | fiber adoption, start as a coroutine |
-| Zend/zend_fibers.c | 869-966 | yield/await via SUSPEND/RESUME |
+| Zend/zend_fibers.c | 869-966 | yield/await via SUSPEND/ENQUEUE |
 | Zend/zend_fibers.c | 1312-1429 | Fiber::suspend/resume/throw dispatch |
 | Zend/zend_fibers.c | 752-773 | force-closing the coroutine when the Fiber object dies |
 | Zend/zend_fibers.c | 1156-1173 | GC: a live fiber is a root; the coroutine edge after finish |
