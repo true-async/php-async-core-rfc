@@ -107,9 +107,13 @@ registered scheduler does.
 
 ### The API
 
-The complete surface added by this RFC: four symbols in the `Async\` namespace. There is no
-public switching primitive — the execution context behind a coroutine is engine-internal, and
-switching is a capability handed only to the scheduler's factory:
+The complete surface standardised by this RFC: four symbols in the `Async\` namespace. The
+engine itself compiles in **no PHP symbols** — the surface is provided by the bridging
+extension (in-tree `ext/async_scheduler_hook`; a C scheduler stack such as TrueAsync provides
+the same names), while the engine owns the storage and the semantics behind it, so the
+behaviour is identical under every provider. There is no public switching primitive — the
+execution context behind a coroutine is engine-internal, and switching is a capability handed
+only to the scheduler's factory:
 
 ```php
 // The mandate. Three real closures over engine internals that exist in no
@@ -264,10 +268,13 @@ final class Context
 }
 
 /**
- * The context of $coroutine, or of the currently running flow when null (main
- * included, whether or not a scheduler is registered). The explicit-object form
- * is how a scheduler reaches a coroutine's context from outside it, e.g. to
- * implement its inheritance policy in spawn().
+ * The context of $coroutine, or of the currently running flow when null (the
+ * main coroutine included). Under a running scheduler this always returns a
+ * context: the main coroutine exists from the script's first opcode. The
+ * only failure is the window where the providing extension is loaded but no
+ * scheduler is registered yet — no coroutine, no context, an Error. The
+ * explicit-object form is how a scheduler reaches a coroutine's context from
+ * outside it, e.g. to implement its inheritance policy in spawn().
  */
 function get_context(?object $coroutine = null): Context {}
 ```
@@ -746,21 +753,23 @@ The **userland** context (string/object keys: request id, tracing span, locale) 
 store, and it is part of this contract for one reason: portability. Its consumers are libraries
 (tracing, logging, DI scopes) that must reach the current flow's context without knowing which
 scheduler is installed; if every scheduler exposed its own accessor, no such library could be
-scheduler-agnostic. `Async\get_context()` returns the current flow's `Context` (main included,
-whether or not a scheduler is registered), and `get_context($coroutine)` the store of a given
-coroutine object; either way the store is created lazily and dies with its coroutine. The engine
-provides storage and access, nothing more. A fresh coroutine starts with an empty context:
-whether a child sees the spawner's values (a copy, a link, or nothing) is inheritance policy,
-and that stays in the scheduler's user-facing API, together with `spawn()` and `await()`.
+scheduler-agnostic. The engine owns the storage — a plain C struct on the coroutine, with the
+operations exported for providers to wrap — while the `Async\Context` class and
+`Async\get_context()` come from the providing extension through a factory slot. The split keeps
+the semantics identical under every provider: the class is a thin surface over the one engine
+store. Under a running scheduler `get_context()` always returns a context — the main coroutine
+exists from the script's first opcode; without one there is no coroutine, no context, and the
+call is an `Error`. `get_context($coroutine)` reaches the store of a given coroutine object;
+either way the store is created lazily and dies with its coroutine. A fresh coroutine starts
+with an empty context: whether a child sees the spawner's values (a copy, a link, or nothing)
+is inheritance policy, and that stays in the scheduler's user-facing API, together with
+`spawn()` and `await()`.
 
 Both stores are implemented in the proof of concept, C extensions reaching the userland store
-through `zend_async_context_find/set/unset`, and are covered by tests on both sides:
-[Zend/tests/async](https://github.com/true-async/php-src/tree/async-core/Zend/tests/async)
-(`context_*.phpt`: the schedulerless main store, per-coroutine isolation, survival of main's
-values through adoption) and
-[ext/test_scheduler/tests](https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler/tests)
-(tests 013 and 032-034: the internal context, isolation under a C scheduler, C/PHP
-cross-visibility, lifetime and object-key ownership).
+through `zend_async_context_find/set/unset`, and are covered by tests in
+[ext/async_scheduler_hook/tests](https://github.com/true-async/php-src/tree/async-core/ext/async_scheduler_hook/tests)
+(`context_*.phpt`: the main coroutine's store, per-coroutine isolation, the explicit-object
+form, the no-scheduler Error).
 
 ### The internal context in practice
 
@@ -829,9 +838,11 @@ registered pair the engine's answer is simply "no". The exact C interface is doc
 
 ## Backward Incompatible Changes
 
-Four symbols are added to the `Async\` namespace: the `SchedulerHook` class, the `Scheduler`
-interface, the `Context` class and the `get_context()` function. Code declaring any of these
-exact names would break; no significant usage is known.
+The engine itself compiles in no PHP symbols. Four names in the `Async\` namespace — the
+`SchedulerHook` class, the `Scheduler` interface, the `Context` class and the `get_context()`
+function — are standardised by this RFC and provided by the bridging extension when it is
+enabled; code declaring any of these exact names would clash with it. No significant usage is
+known.
 
 No other observable changes are introduced. With no scheduler registered, PHP behaves exactly as
 before.
@@ -938,14 +949,18 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 ## Patches and Tests
 
 - Proof of concept: https://github.com/true-async/php-src/tree/async-core
-  (core, PHP engine invocation points, phpdbg, the PHP registration bridge and its tests).
-  Includes the full context implementation: `Async\Context`, `Async\get_context()` and the
-  `zend_async_context_*` C API, with tests in
-  [Zend/tests/async](https://github.com/true-async/php-src/tree/async-core/Zend/tests/async).
+  (the core ABI, the PHP engine invocation points, the coroutine context storage and the
+  `zend_async_context_*` C API).
+- The bridging extension:
+  https://github.com/true-async/php-src/tree/async-core/ext/async_scheduler_hook — the PHP
+  surface of the hook layer (`Async\SchedulerHook`, `Async\Scheduler`, `Async\Context`,
+  `Async\get_context()`), built entirely on exported `ZEND_API`, with the .phpt suite
+  exercising the hooks, the switch contract and the context end to end. Optional:
+  `--enable-async-scheduler-hook`.
 - Test scheduler: https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler,
   an in-tree C scheduler (the C twin of the MiniScheduler above) filling every ABI slot from a
-  separate Zend extension, with the .phpt suite exercising the hooks end to end. Built only with
-  `--enable-test-scheduler`, activated by `test_scheduler.enable=1`.
+  separate Zend extension. Gated by `test_scheduler.enable` (default off), so the upstream test
+  suites run schedulerless in the same binary.
 - Scheduler extension: https://github.com/true-async/true-async, the reference C implementation
   of the hooks for this core.
 
