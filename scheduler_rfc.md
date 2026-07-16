@@ -1,6 +1,6 @@
 # PHP RFC: Async Scheduler Hook API
 
-- **Version:** 0.5
+- **Version:** 1.0
 - **Date:** 2026-07-16
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
@@ -973,39 +973,3 @@ Yes/no vote, 2/3 majority required: "Accept the Async Scheduler Hook API RFC?"
 ## Rejected Features
 
 None yet.
-
-## Changelog
-
-- **0.5**: the hook API is brought in line with the implementation. `onLaunch()` joins the
-  interface: the main flow is a coroutine from its first opcode, defined by the scheduler up
-  front instead of being normalised at its first yield; the end-of-main handover
-  (`onSuspend(fromMain: true)`) now explicitly **replaces** the finished main with a fresh main
-  coroutine the scheduler returns. The mandate becomes coroutine-centric — `bindEntry` /
-  `switchTo` / `currentCoroutine`, real closures over engine internals registered nowhere — and
-  the public `Continuation` class is removed: the execution context behind a coroutine is
-  engine-internal, and exposing it as an object would hand every holder a switching primitive.
-  `onWaitInfo` leaves the interface: awaiting-info registrations are a C-level diagnostics seam
-  wiped whole at enqueue. On the C side, `resume` merged into `enqueue` (one make-runnable
-  operation with an error channel), matching what `onEnqueue` always was in PHP.
-
-- **0.4**: the userland context gains a standard PHP API: `Async\Context` (find/has/set/unset,
-  string/object keys) and `Async\get_context(?object $coroutine = null)`, so context-consuming
-  libraries stay scheduler-agnostic. Storage and access are engine-owned and per-coroutine;
-  inheritance policy remains with the scheduler's user-facing API. The internal context stays
-  C-only, unchanged. The scheduler loops (the reactor sketch and the MiniScheduler) gain the
-  hand-off rule and park-to-main, fixing a lost-flow bug the in-tree test scheduler
-  (ext/test_scheduler, the new runtime validation of the ABI) uncovered. The context API is
-  implemented in the proof of concept (engine, PHP bridge and the test scheduler), tests on both
-  the PHP and the C side.
-- **0.3**: the context leaves the hooks. The internal context moves into the engine's coroutine
-  structure (engine-owned storage behind the C macros: it is a hot path, and coroutine-local
-  memory is what everything above the scheduler depends on); the userland context joins
-  `spawn()`/`await()` in the scheduler's user-facing API, outside this contract. The `Scheduler`
-  interface shrinks to the six event hooks.
-- **0.2**: one error channel for the PHP hooks: failures are exceptions, `bool` returns remain
-  only where `false` is data (`onEnqueue`: not accepted, `contextUnset`: key existed);
-  `register()` returns void and throws on every failure. `Continuation::switchTo()` gained an
-  `$error` parameter, and the full value/exception transfer contract is specified in the new
-  "Exceptions and value transfer" section. New "Process forking" section: `pcntl_fork()` throws
-  while a scheduler is active, with a C-level fork-hook pair as the escape hatch.
-- **0.1**: initial draft.
