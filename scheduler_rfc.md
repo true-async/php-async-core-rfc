@@ -5,6 +5,7 @@
 - **Author:** Edmond, edmondifthen@proton.me
 - **Status:** Draft
 - **Implementation:** https://github.com/true-async/php-src/tree/async-core
+- **Pull request:** https://github.com/php/php-src/pull/22561
 - **Discussion thread:** tbd
 - **Voting thread:** tbd
 
