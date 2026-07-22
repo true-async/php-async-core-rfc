@@ -14,7 +14,12 @@
 This RFC does not add a single class, function, constant or keyword to PHP. It changes what the
 engine is able to do.
 
-Today the PHP engine can execute exactly one flow of execution. Fibers (PHP 8.1) gave userland a
+Today the PHP engine can execute exactly one *logical* flow of execution. Throughout this document
+a "flow" means a logical flow, never an OS thread: everything described here happens inside a
+single OS thread, and nothing in this proposal introduces parallelism, shared-memory threading or
+any change to ZTS. Interleaving is cooperative, and only one flow runs at a time.
+
+Fibers (PHP 8.1) gave userland a
 way to save and restore a call stack, but the engine itself still assumes one flow throughout:
 the top-level script is not a schedulable unit, the garbage collector and the destructor phase
 run wherever they happen to be triggered, and the state of built-in functions is global to the
