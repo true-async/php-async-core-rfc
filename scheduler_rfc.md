@@ -177,10 +177,11 @@ coroutine's unhandled exception. Switching into a finished coroutine is an `Erro
 The engine raises six notifications. It performs no scheduling of its own; every scheduling
 decision comes back through a notification's return value.
 
-Each notification below ends with a sketch of a scheduler's handler. `MyCoroutine` stands for the
-scheduler's own coroutine class, and the engine operations available to the scheduler appear as
-closures it holds, such as `$this->switchTo` and `$this->currentCoroutine`. Handler and helper
-names are illustrative, not part of this RFC.
+Each notification below ends with a sketch of a scheduler's handler. Every PHP snippet in this
+document is pseudocode: it illustrates the semantics, and none of it is an API this RFC adds (the
+engine defines no PHP symbols; a bridge extension could offer such a surface). `MyCoroutine`
+stands for the scheduler's own coroutine class, and the engine operations available to the
+scheduler appear as closures it holds, such as `$this->switchTo` and `$this->currentCoroutine`.
 
 An exception that escapes a notification with userland frames
 beneath it surfaces at the suspension point of the flow that yielded; one with no userland frame
