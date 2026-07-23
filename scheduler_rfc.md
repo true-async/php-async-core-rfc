@@ -53,7 +53,7 @@ is one such API, built on this core.
 
 The same applies to activation from PHP. A bridge extension that lets a scheduler be written in
 plain PHP is possible and exists, but it is an extension like any other and is not part of this
-proposal. See "Design rationale".
+proposal. See "Design rationale: why the engine defines no PHP-level hooks".
 
 This separation is deliberate. The engine standardizes how concurrency is activated and which
 component is in charge, while the ecosystem retains full freedom over how concurrency is presented
@@ -79,10 +79,11 @@ to the user.
 
 ## Proposal
 
-### Coroutines
+### Scheduler ABI
 
-This RFC adds the mechanism on which an implementation of coroutines can later be built, and with
-it brings symmetric flows of execution into the engine.
+The engine and the scheduler exchange two things: coroutines, and control transferred between
+them. This RFC adds the mechanism on which an implementation of coroutines can later be built,
+and with it brings symmetric flows of execution into the engine.
 
 A coroutine is a lightweight unit of execution: a callable with a defined lifecycle.
 
@@ -312,12 +313,12 @@ no lazy initialization and no implicit start on the first asynchronous call. Reg
 scheduler is an `Error`, as is any other registration failure; nothing is reported through a
 return value. With no scheduler registered, every notification above is inert.
 
-### Design rationale
+### Design rationale: why the engine defines no PHP-level hooks
 
 The obvious alternative was to expose the activation contract to PHP: a class to register a
 scheduler with, an interface for the scheduler to implement, and enough surface for a scheduler to
-be written in plain PHP. An earlier draft of this proposal did exactly that. It was removed, for
-four reasons.
+be written in plain PHP. An earlier draft of this proposal did exactly that, in an `Async\`
+namespace. It was removed, for four reasons.
 
 **The engine compiles in no PHP symbols.** With nothing added to any namespace, there are no name
 collisions, nothing in existing code can break, and there is no new surface for tools to learn.
@@ -337,7 +338,8 @@ behavior, and neither has to win.
 
 The same reasoning governs the execution context. Exposing it as an object would hand a switching
 primitive to every holder of that object, so it stays engine-internal and switching is a granted
-operation instead.
+operation instead. And for the same reason the engine ships no scheduler and no event loop of its
+own: those are policy, and policy belongs to the extension.
 
 One decision does survive from the earlier draft. A coroutine's execution context is built on the
 same `zend_fiber_context` the `Fiber` API uses, so step debugging and stack traces keep working
@@ -782,17 +784,7 @@ To be filled in after acceptance: merged version, commit links, manual entries.
 
 ## Rejected Features
 
-**A PHP-level API for registering a scheduler.** See "Design rationale". An earlier draft defined
-classes and an interface in an `Async\` namespace through which a scheduler could be written in
-PHP. That surface has been removed; it is one possible implementation and belongs to the
-extension that ships it. The engine compiles in no PHP symbols.
-
-**Exposing the execution context as an object.** Any holder of such an object holds the ability to
-switch execution, which is a privilege that should belong to the scheduler alone. It is a granted
-operation instead.
-
-**Shipping a scheduler in core.** No scheduler, no event loop and no user-facing concurrency API
-is added to the engine.
+None.
 
 ## Changelog
 
