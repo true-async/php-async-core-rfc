@@ -1,16 +1,16 @@
-# PHP RFC: Concurrency Support in the PHP Engine
+====== PHP RFC: Concurrency Support in the PHP Engine ======
 
-- **Version:** 0.9
-- **Date:** 2026-07-23
-- **Author:** Edmond, edmondifthen@proton.me
-- **Status:** Draft
-- **First Published at:** https://wiki.php.net/rfc/async_scheduler_abi
-- **Implementation:** https://github.com/true-async/php-src/tree/async-core
-- **Pull request:** https://github.com/php/php-src/pull/22561
-- **Discussion thread:** tbd
-- **Voting thread:** tbd
+  * **Version:** 0.9
+  * **Date:** 2026-07-23
+  * **Author:** Edmond, edmondifthen@proton.me
+  * **Status:** Draft
+  * **First Published at:** https://wiki.php.net/rfc/async_scheduler_abi
+  * **Implementation:** https://github.com/true-async/php-src/tree/async-core
+  * **Pull request:** https://github.com/php/php-src/pull/22561
+  * **Discussion thread:** tbd
+  * **Voting thread:** tbd
 
-## Introduction
+===== Introduction =====
 
 PHP has no engine-level way to run code concurrently. Fibers (PHP 8.1) added the low-level
 primitive, cooperative context switching, but no scheduler: deciding what runs, when, and in which
@@ -36,20 +36,20 @@ This RFC adds no classes, no functions, no constants and no syntax. The engine c
 symbols at all. With no scheduler registered, PHP behaves exactly as it does today.
 
 An RFC whose changes are internal to the engine is an established form; recent examples are the
-[Polling API](https://wiki.php.net/rfc/poll_api) for PHP 8.6 and the
-[IR-based JIT](https://wiki.php.net/rfc/jit-ir) for PHP 8.4.
+[[https://wiki.php.net/rfc/poll_api|Polling API]] for PHP 8.6 and the
+[[https://wiki.php.net/rfc/jit-ir|IR-based JIT]] for PHP 8.4.
 
-## Scope: what this RFC deliberately does not define
+===== Scope: what this RFC deliberately does not define =====
 
 This document defines only the points at which the engine and a scheduler meet: the notifications
 the engine raises, and the operations it grants in return. It builds no concrete scheduler into the
 engine, and it defines no name visible to PHP code.
 
 **Extensions and third-party code remain free to define arbitrary functions, classes and APIs on
-top of the registered scheduler** (`spawn()`, `await()`, channels, futures, an `Async\` namespace),
+top of the registered scheduler** (''spawn()'', ''await()'', channels, futures, an ''Async\'' namespace),
 **and this RFC intentionally defines none of them.** The class of the coroutine object, the
 transfer of values between coroutines, and the shape of the user-facing API are the exclusive
-domain of the scheduler implementation. The [True Async RFC](https://wiki.php.net/rfc/true_async)
+domain of the scheduler implementation. The [[https://wiki.php.net/rfc/true_async|True Async RFC]]
 is one such API, built on this core.
 
 The same applies to activation from PHP. A bridge extension that lets a scheduler be written in
@@ -60,27 +60,17 @@ This separation is deliberate. The engine standardizes how concurrency is activa
 component is in charge, while the ecosystem retains full freedom over how concurrency is presented
 to the user.
 
-## Goals
+===== Goals =====
 
-1. **A single activation contract.** One registration point removes the need for libraries to
-   depend on a specific event-loop implementation.
-2. **Implementable from outside the engine.** Everything a scheduler needs is reachable by an
-   ordinary extension, with no further engine changes. The in-tree reference scheduler fills every
-   slot from a separate Zend extension and is the runtime proof of this.
-3. **Strict opt-in.** With no scheduler registered, PHP behaves exactly as it does today, at
-   negligible cost.
-4. **Backward-compatible fiber adoption.** Existing `Fiber`-based code keeps running unchanged.
-   When a scheduler is active, the foreign-fiber notification lets it adopt each starting
-   fiber onto its schedule, and a fiber it declines keeps its existing behavior. Through
-   adoption, fiber-based libraries such as ReactPHP, Revolt and AMPHP can run on the engine's
-   scheduler instead of each driving concurrency on its own.
-5. **Direct switching between coroutines.** The switch operation transfers control from one
-   coroutine into another instead of routing every handoff through a central loop. The switch is
-   symmetric and built on the engine's own fiber machinery.
+  - **A single activation contract.** One registration point removes the need for libraries to depend on a specific event-loop implementation.
+  - **Implementable from outside the engine.** Everything a scheduler needs is reachable by an ordinary extension, with no further engine changes. The in-tree reference scheduler fills every slot from a separate Zend extension and is the runtime proof of this.
+  - **Strict opt-in.** With no scheduler registered, PHP behaves exactly as it does today, at negligible cost.
+  - **Backward-compatible fiber adoption.** Existing ''Fiber''-based code keeps running unchanged. When a scheduler is active, the foreign-fiber notification lets it adopt each starting fiber onto its schedule, and a fiber it declines keeps its existing behavior. Through adoption, fiber-based libraries such as ReactPHP, Revolt and AMPHP can run on the engine's scheduler instead of each driving concurrency on its own.
+  - **Direct switching between coroutines.** The switch operation transfers control from one coroutine into another instead of routing every handoff through a central loop. The switch is symmetric and built on the engine's own fiber machinery.
 
-## Proposal
+===== Proposal =====
 
-### What becomes possible, and what does not
+==== What becomes possible, and what does not ====
 
 This proposal is a mechanism rather than a concurrency model. The table below separates what
 this RFC itself ships, what it makes possible to implement in the future, and what remains
@@ -88,16 +78,15 @@ impossible even with it. "In this RFC" works the day the proposal is merged; "po
 is future work this seam enables, in extensions or in later RFCs; "separate work" needs a
 proposal of its own; "unattainable" marks the limits of the runtime itself.
 
-| Capability | Status | What it rests on |
-|---|---|---|
+^ Capability ^ Status ^ What it rests on ^
 | Stackful coroutines | In this RFC | A coroutine owns an execution context, so it can suspend at any call depth. |
 | Direct transfer between coroutines | In this RFC | The symmetric switch operation, described in goal 5. |
-| Adopting `Fiber`-based libraries onto one schedule | In this RFC | The foreign-fiber notification, described in goal 4. |
-| Per-coroutine state for core functions and extensions | In this RFC, storage only | The two per-coroutine stores are part of this proposal; converting `ob_start()` and its neighbors to use them is follow-up work. |
-| Transparent asynchrony, with no function coloring | Possible on top | A function written to suspend can do so at any call depth, and no `async` marker travels up the call chain. Which functions suspend is up to the I/O layer and the extensions: until those exist, the engine's blocking calls block the whole thread, coroutines included. |
-| An `async`/`await` surface with colored functions | Possible on top | Not part of this RFC, but buildable over the same switching primitive: transparency is not mandatory, and both surfaces can coexist in one process. |
+| Adopting ''Fiber''-based libraries onto one schedule | In this RFC | The foreign-fiber notification, described in goal 4. |
+| Per-coroutine state for core functions and extensions | In this RFC, storage only | The two per-coroutine stores are part of this proposal; converting ''ob_start()'' and its neighbors to use them is follow-up work. |
+| Transparent asynchrony, with no function coloring | Possible on top | A function written to suspend can do so at any call depth, and no ''async'' marker travels up the call chain. Which functions suspend is up to the I/O layer and the extensions: until those exist, the engine's blocking calls block the whole thread, coroutines included. |
+| An ''async''/''await'' surface with colored functions | Possible on top | Not part of this RFC, but buildable over the same switching primitive: transparency is not mandatory, and both surfaces can coexist in one process. |
 | Faster fiber-based event loops (Revolt, ReactPHP, AMPHP) | Possible on top | An adopted fiber switches through the symmetric primitive: a handoff that costs two asymmetric switches through the loop's resumer costs one. |
-| An HTTP/2, WebSocket or SSE server on coroutines, integrated with PHP | Possible on top | A flow per connection and per-flow state are what this seam supplies; the server loop and the protocol live in an extension. Both already exist over the proof of concept: the [TrueAsync server](https://github.com/true-async/server) (HTTP, gRPC) and a [FrankenPHP fork](https://github.com/true-async/frankenphp) running its workers on coroutines. |
+| An HTTP/2, WebSocket or SSE server on coroutines, integrated with PHP | Possible on top | A flow per connection and per-flow state are what this seam supplies; the server loop and the protocol live in an extension. Both already exist over the proof of concept: the [[https://github.com/true-async/server|TrueAsync server]] (HTTP, gRPC) and a [[https://github.com/true-async/frankenphp|FrankenPHP fork]] running its workers on coroutines. |
 | Non-blocking I/O, timers, DNS | Separate work | The proposal defines the scheduler seam. The I/O layer and the reactor behind it are their own body of work. |
 | Preemption of a running coroutine | Separate work | Every switch this proposal defines is explicit. A scheduler could build preemption on the engine's existing interrupt machinery, which this proposal neither provides nor precludes. |
 | Goroutine-style M:N scheduling | Unattainable | Needs OS threads that share one object store; PHP's runtime is per-thread. See below. |
@@ -112,10 +101,10 @@ for PHP today; lifting the limit would mean a different memory model, far beyond
 **What it changes for the existing ecosystem.** ReactPHP, Revolt and AMPHP keep working
 unchanged, and this RFC requires nothing from them; adoption onto the engine's scheduler is
 opt-in, per fiber. What no library can do for itself is per-flow state inside the engine:
-`ob_start()` and `gethostbyname()` keep their state in globals no library owns, so only the engine
+''ob_start()'' and ''gethostbyname()'' keep their state in globals no library owns, so only the engine
 can make them coroutine-safe.
 
-### Scheduler ABI
+==== Scheduler ABI ====
 
 The engine and the scheduler exchange two things: coroutines, and control transferred between
 them. This RFC adds the coroutine representation and the switching mechanism beneath it, and with
@@ -135,8 +124,8 @@ the coroutine object. The coroutine is the schedulable unit on top of it, adding
 result or unhandled exception, and cancellation. The engine, the notifications and the
 operations all work in terms of coroutines. No lower-level primitive is exposed.
 
-Two orthogonal attributes may additionally apply: *canceled*, meaning cancellation has been
-requested, and *main*, meaning the coroutine that wraps the top-level script. Each coroutine
+Two orthogonal attributes may additionally apply: //canceled//, meaning cancellation has been
+requested, and //main//, meaning the coroutine that wraps the top-level script. Each coroutine
 records its completion result or unhandled exception, the source location at which it was spawned,
 and, while suspended, descriptions of what it is waiting for. Those awaiting-info registrations
 are attached by the code that suspends the coroutine and are wiped as a whole when it is enqueued
@@ -147,7 +136,7 @@ only.
 At the PHP level a coroutine is an opaque object. This RFC does not define its class; the
 registered scheduler does.
 
-The top-level script itself runs as a coroutine, the *main* one, from its first opcode, borrowing
+The top-level script itself runs as a coroutine, the //main// one, from its first opcode, borrowing
 the OS-thread stack the script is already on. This removes the special case a distinct main flow
 would force into every scheduler path: the queues hold one type of unit, the switch path is
 single, and per-coroutine state applies to the main flow like to any other. A finished main
@@ -155,7 +144,7 @@ coroutine is replaced rather than recycled: the code that runs after the script'
 shutdown functions and destructors, gets a fresh main coroutine from the scheduler (see the
 request lifecycle section).
 
-Symmetric switching is the second half of the mechanism. A `Fiber` is asymmetric: it yields only
+Symmetric switching is the second half of the mechanism. A ''Fiber'' is asymmetric: it yields only
 to its resumer, so going from A to B costs two switches through an intermediary. The switch
 operation the scheduler receives is symmetric, so A goes to B directly. This halves the number
 of switches on the paths where they are frequent, such as channels, generators and pipelines.
@@ -170,16 +159,16 @@ ignores the value, and a first entry carrying an error finishes the coroutine wi
 without starting the body: the cancellation of a coroutine that never ran. Completion travels the
 same channel: the body's result, or the exception it did not catch, surfaces at the switch site
 of the flow that last switched in, in practice the scheduler, which records what escapes as the
-coroutine's unhandled exception. Switching into a finished coroutine is an `Error`.
+coroutine's unhandled exception. Switching into a finished coroutine is an ''Error''.
 
-### Engine notification points
+==== Engine notification points ====
 
 The engine raises six notifications. It performs no scheduling of its own; every scheduling
 decision comes back through a notification's return value.
 
-Each notification below ends with a sketch of a scheduler's handler. `MyCoroutine` stands for the
+Each notification below ends with a sketch of a scheduler's handler. ''MyCoroutine'' stands for the
 scheduler's own coroutine class, and the engine operations available to the scheduler appear as
-closures it holds, such as `$this->switchTo` and `$this->currentCoroutine`. Handler and helper
+closures it holds, such as ''$this->switchTo'' and ''$this->currentCoroutine''. Handler and helper
 names are illustrative, not part of this RFC.
 
 An exception that escapes a notification with userland frames
@@ -187,48 +176,46 @@ beneath it surfaces at the suspension point of the flow that yielded; one with n
 beneath it is reported as unhandled and tears the request down, so a scheduler should not let
 exceptions escape.
 
-#### Launch
+=== Launch ===
 
 **When:** the scheduler starts. A scheduler registered from C launches immediately before the
 script's first line; one registered during the script, through a bridge extension, launches at its
-registration point.
-**Receives:** nothing.
-**Returns:** the coroutine the top-level script runs in.
-**Engine guarantees:** it marks the returned coroutine *main*, records it as current, and binds
+registration point. \\
+**Receives:** nothing. \\
+**Returns:** the coroutine the top-level script runs in. \\
+**Engine guarantees:** it marks the returned coroutine //main//, records it as current, and binds
 its own execution context to it, so switching into that coroutine resumes the script at its
-suspension point.
-**Scheduler must:** return one of its own coroutine objects, constructed and ready to be recorded.
-**Errors:** returning anything that is not a coroutine object is an `Error`. Without a main
+suspension point. \\
+**Scheduler must:** return one of its own coroutine objects, constructed and ready to be recorded. \\
+**Errors:** returning anything that is not a coroutine object is an ''Error''. Without a main
 coroutine there is no flow to run the script in.
 
-```php
+<code php>
 public function onLaunch(): object
 {
     // The coroutine the top-level script runs in, from its first opcode.
     return $this->main = new MyCoroutine();
 }
-```
+</code>
 
-#### Suspend
+=== Suspend ===
 
-**When:** a flow calls the engine's suspend entry point, handing control to the scheduler.
+**When:** a flow calls the engine's suspend entry point, handing control to the scheduler. \\
 **Receives:**
-- `fromMain` (boolean): the main coroutine has finished. The script's code is over, and whatever
-  runs afterward, such as shutdown functions and destructors, is a different flow.
-- `isBailout` (boolean): the main flow terminated abnormally, through a fatal error. This call can
-  arrive while the engine is already terminating.
+  * ''fromMain'' (boolean): the main coroutine has finished. The script's code is over, and whatever runs afterward, such as shutdown functions and destructors, is a different flow.
+  * ''isBailout'' (boolean): the main flow terminated abnormally, through a fatal error. This call can arrive while the engine is already terminating.
 
 **Returns:** the coroutine that is running when control comes back. The engine records it as
 current. The launch and suspend return values are the only way the engine learns which coroutine
-is current; it never chooses one itself.
-**Engine guarantees:** the call returns when something switches back into the yielding flow.
+is current; it never chooses one itself. \\
+**Engine guarantees:** the call returns when something switches back into the yielding flow. \\
 **Scheduler must:** either switch into another runnable coroutine or wait for events. When
-`fromMain` is set, drain the remaining coroutines and return a fresh main coroutine rather than
-the finished one. When `isBailout` is set, it may discard the remaining work instead of completing
-it; this is its last chance to release resources.
-**Errors:** returning the finished main coroutine, or a non-object, is an `Error`.
+''fromMain'' is set, drain the remaining coroutines and return a fresh main coroutine rather than
+the finished one. When ''isBailout'' is set, it may discard the remaining work instead of completing
+it; this is its last chance to release resources. \\
+**Errors:** returning the finished main coroutine, or a non-object, is an ''Error''.
 
-```php
+<code php>
 public function onSuspend(bool $fromMain, bool $isBailout): object
 {
     $self = ($this->currentCoroutine)();
@@ -240,29 +227,28 @@ public function onSuspend(bool $fromMain, bool $isBailout): object
         ? $this->main = new MyCoroutine() // the finished main is replaced
         : $self;
 }
-```
+</code>
 
-#### Enqueue
+=== Enqueue ===
 
 **When:** a coroutine is to be made runnable. Creating a fresh coroutine and resuming a suspended
-one are the same operation.
+one are the same operation. \\
 **Receives:**
-- the coroutine.
-- an optional error (throwable) to be raised at the coroutine's suspension point. This is how
-  cancellation, timeouts and I/O failures reach waiting code.
+  * the coroutine.
+  * an optional error (throwable) to be raised at the coroutine's suspension point. This is how cancellation, timeouts and I/O failures reach waiting code.
 
-**Returns:** boolean. `true` means the coroutine is queued and will run. `false` means it was not
-accepted, for example during shutdown.
+**Returns:** boolean. ''true'' means the coroutine is queued and will run. ''false'' means it was not
+accepted, for example during shutdown. \\
 **Engine guarantees:** the engine itself does not act on the returned value; the caller observes
-it. At a PHP-visible boundary the engine converts a rejection into a thrown `Error`, for instance
-on `Fiber::resume()` against an adopted fiber.
+it. At a PHP-visible boundary the engine converts a rejection into a thrown ''Error'', for instance
+on ''Fiber::resume()'' against an adopted fiber. \\
 **Scheduler must:** deliver the error, when present, through the error parameter of the switch
-operation.
-**Errors:** a `false` return is a quiet rejection and not an error. A C caller such as a reactor
+operation. \\
+**Errors:** a ''false'' return is a quiet rejection and not an error. A C caller such as a reactor
 callback observes it, disposes of the error it was delivering, and treats the coroutine as never
 scheduled.
 
-```php
+<code php>
 public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool
 {
     if ($this->shuttingDown) {
@@ -272,24 +258,24 @@ public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool
     $this->ready->enqueue([$coroutine, $error]);
     return true;                          // the error travels with the next switch
 }
-```
+</code>
 
-#### Foreign fiber
+=== Foreign fiber ===
 
-**When:** a `Fiber` created by application or third-party code starts, while a scheduler is active.
-**Receives:** the fiber.
+**When:** a ''Fiber'' created by application or third-party code starts, while a scheduler is active. \\
+**Receives:** the fiber. \\
 **Returns:** a coroutine to adopt the fiber onto the schedule, or nothing to leave it a plain
-low-level fiber.
+low-level fiber. \\
 **Engine guarantees:** when the fiber is adopted, the engine owns its body and runs it like any
-other coroutine. The fiber's operations become scheduler policy: `start()`, `resume()` and
-`throw()` park their value or exception, enqueue the adopted coroutine, and yield to the
-scheduler rather than switching into the fiber immediately.
+other coroutine. The fiber's operations become scheduler policy: ''start()'', ''resume()'' and
+''throw()'' park their value or exception, enqueue the adopted coroutine, and yield to the
+scheduler rather than switching into the fiber immediately. \\
 **Scheduler must:** decide per fiber. A scheduler that creates fibers for its own use must
 decline them, or it would recurse into itself; it recognizes them by keeping its own private set,
-since the engine tracks nothing here and no outside code can mark a fiber as internal.
+since the engine tracks nothing here and no outside code can mark a fiber as internal. \\
 **Errors:** none defined.
 
-```php
+<code php>
 public function onFiber(\Fiber $fiber): ?object
 {
     if ($this->ownFibers->contains($fiber)) {
@@ -298,56 +284,56 @@ public function onFiber(\Fiber $fiber): ?object
 
     return new MyCoroutine();             // adopt the application fiber
 }
-```
+</code>
 
-#### Defer
+=== Defer ===
 
-**When:** a one-shot task is queued to run at the next scheduling point.
-**Receives:** the callable.
-**Returns:** nothing.
+**When:** a one-shot task is queued to run at the next scheduling point. \\
+**Receives:** the callable. \\
+**Returns:** nothing. \\
 **Engine guarantees:** the engine stores nothing. Every deferral routes here, whether queued by
 engine code, by an extension, or by an extension on behalf of PHP code, and the queue lives in the
-scheduler.
-**Scheduler must:** run the task on its next tick.
+scheduler. \\
+**Scheduler must:** run the task on its next tick. \\
 **Errors:** a scheduler that cannot accept the task throws. A silent rejection would lose the task
 unnoticed.
 
-```php
+<code php>
 public function onDefer(callable $task): void
 {
     $this->deferred->enqueue($task);      // drained once per tick
 }
-```
+</code>
 
-#### Shutdown
+=== Shutdown ===
 
 **When:** concurrency must end early. This is not tied to a fixed point in the request lifecycle;
-it is raised when a coroutine ends through `exit()`.
-**Receives:** nothing.
-**Returns:** nothing.
-**Engine guarantees:** the notification is raised before the graceful shutdown phase begins.
+it is raised when a coroutine ends through ''exit()''. \\
+**Receives:** nothing. \\
+**Returns:** nothing. \\
+**Engine guarantees:** the notification is raised before the graceful shutdown phase begins. \\
 **Scheduler must:** stop accepting new work and decide what happens to the remaining coroutines,
-either running them to completion or canceling them by enqueuing with an error.
+either running them to completion or canceling them by enqueuing with an error. \\
 **Errors:** none defined.
 
-```php
+<code php>
 public function onShutdown(): void
 {
     $this->shuttingDown = true;           // no new work is accepted
     $this->cancelRemaining();             // policy: cancel, or drain to completion
 }
-```
+</code>
 
-### Registration
+==== Registration ====
 
 A scheduler is registered once per process, and from that moment concurrency is active. There is
 no lazy initialization and no implicit start on the first asynchronous call. Registering a second
-scheduler is an `Error`, as is any other registration failure; nothing is reported through a
+scheduler is an ''Error'', as is any other registration failure; nothing is reported through a
 return value. With no scheduler registered, every notification above is inert.
 
-### Design rationale: why the engine defines no PHP-level hooks
+==== Design rationale: why the engine defines no PHP-level hooks ====
 
-An earlier draft exposed the activation contract to PHP: an `Async\` namespace with a
+An earlier draft exposed the activation contract to PHP: an ''Async\'' namespace with a
 registration class and a scheduler interface. It was dropped. The engine now compiles in no PHP
 symbols, so nothing collides and nothing existing can break, and no names or signatures that
 practice has not yet tested get frozen into the engine; a bridge extension can offer PHP-level
@@ -356,20 +342,20 @@ reason the engine ships no scheduler and no event loop of its own: those are pol
 belongs to the extension.
 
 One decision survives from that draft. A coroutine's execution context is built on the same
-`zend_fiber_context` the `Fiber` API uses, so step debugging, stack traces and fiber-aware
+''zend_fiber_context'' the ''Fiber'' API uses, so step debugging, stack traces and fiber-aware
 tooling such as Xdebug keep working.
 
-### How a scheduler is used
+==== How a scheduler is used ====
 
 The notifications are the seam where a scheduler plugs its implementation into the engine. The
 engine raises them, and the scheduler supplies the behavior. Everything a user sees, such as
-`spawn()`, `await()`, timers and channels, is ordinary code built on top of that seam.
+''spawn()'', ''await()'', timers and channels, is ordinary code built on top of that seam.
 
-A non-blocking `sleep()`, for instance, is a handful of lines. It remembers the running coroutine,
+A non-blocking ''sleep()'', for instance, is a handful of lines. It remembers the running coroutine,
 arms a timer on the Polling API to wake it after the delay, and yields, so the thread runs other
 coroutines instead of blocking.
 
-```php
+<code php>
 // Pseudocode. The reactor and helper names are illustrative and are not part of this RFC.
 function sleep(float $seconds): void
 {
@@ -378,43 +364,43 @@ function sleep(float $seconds): void
         resume($coroutine));                               // wake it when the timer fires
     suspend();                                             // yield; other coroutines run
 }
-```
+</code>
 
-`Poll` is the engine's event API. `currentCoroutine()`, `resume()` and `suspend()` are the
-scheduler's user-facing helpers, and `suspend()` routes through the suspend notification. This RFC
+''Poll'' is the engine's event API. ''currentCoroutine()'', ''resume()'' and ''suspend()'' are the
+scheduler's user-facing helpers, and ''suspend()'' routes through the suspend notification. This RFC
 standardizes only the notifications underneath, not this surface.
 
 The engine keeps track of which coroutine is currently running, but never chooses it. The
 scheduler reports it through the return value of the suspend notification, and reads it back
 through the current-coroutine operation. How the coroutine is then exposed to userland, whether
-through an accessor, a coroutine class, or `spawn()` and `await()`, is not part of this RFC.
+through an accessor, a coroutine class, or ''spawn()'' and ''await()'', is not part of this RFC.
 
 The same split applies to deferred tasks. The one-shot callback queue belongs to the scheduler,
 not to the engine. The engine only forwards the callable; storage, draining and exact semantics
 are the scheduler's policy.
 
 For a complete, runnable implementation, the test suite of
-[ext-scheduler-hook](https://github.com/true-async/ext-scheduler-hook) registers schedulers
+[[https://github.com/true-async/ext-scheduler-hook|ext-scheduler-hook]] registers schedulers
 written in plain PHP and exercises every notification.
 
-### The scheduler and the reactor
+==== The scheduler and the reactor ====
 
 The scheduler owns coroutines and a run queue. A reactor, meaning an event loop over the operating
 system's descriptors, timers and signals, is what makes I/O non-blocking. They are two halves of
 one loop and meet at exactly two points. The reactor itself is outside this RFC; its C-level
 interface is a separate document,
-[reactor.md](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md).
+[[https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md|reactor.md]].
 
 **A reactor callback wakes a coroutine.** A non-blocking operation arms an event on the reactor
 and suspends the coroutine. When the event fires, the reactor's callback hands the coroutine back
 to the scheduler through the enqueue notification, moving it from suspended to runnable. The
-reactor never runs coroutine code; it only flips the coroutine to ready. This is the `sleep()`
+reactor never runs coroutine code; it only flips the coroutine to ready. This is the ''sleep()''
 above: its timer callback resumes the coroutine.
 
 **When idle, the scheduler blocks in the reactor.** When the run queue drains, the scheduler does
 not spin. From inside the suspend notification it asks the reactor to block until the next event.
 
-```php
+<code php>
 // Pseudocode: the scheduler's suspend handler, blocking in the reactor when idle.
 public function onSuspend(bool $fromMain, bool $isBailout): object
 {
@@ -445,7 +431,7 @@ public function onSuspend(bool $fromMain, bool $isBailout): object
 
     return $self;                          // this frame resumes when $self runs again
 }
-```
+</code>
 
 Coroutines run until they all park on I/O, the queue empties, the scheduler blocks in the reactor,
 an event fires a callback, the callback re-queues a coroutine, and the scheduler switches into it.
@@ -453,10 +439,10 @@ No coroutine is lost and the thread never busy-waits.
 
 Control returning from a switch means one of two things: either this flow's own turn came and it
 should resume its work, or the coroutine it switched into parked or finished and the drain
-continues. The `$handoff` marker in the loop tells the two apart; without it, a flow dequeued in
+continues. The ''$handoff'' marker in the loop tells the two apart; without it, a flow dequeued in
 the middle of its own scheduling pass would be skipped and never resumed.
 
-### The coroutine context
+==== The coroutine context ====
 
 A coroutine needs memory of its own. Everything built on top of the scheduler depends on it:
 frameworks keep the request id, DI scopes and transaction state per flow, and many PHP functions
@@ -483,24 +469,24 @@ wrap. Whether it is exposed to PHP at all, and under what name, is the scheduler
 choice; this RFC standardizes the storage, not a class. Each store is created lazily and dies
 with its coroutine. A fresh coroutine starts empty; whether a child sees the spawner's values, as
 a copy, as a link, or not at all, is inheritance policy and stays in the scheduler's user-facing
-API alongside `spawn()`.
+API alongside ''spawn()''.
 
-### The internal context in practice
+==== The internal context in practice ====
 
-Some functions need to keep state tied to a coroutine. An example is `ob_start()`: it pushes a
+Some functions need to keep state tied to a coroutine. An example is ''ob_start()'': it pushes a
 handler onto a stack, and with thousands of coroutines interleaving in one process, a single
 process-global stack would mix their output. Moving the handler stack into the coroutine's
 internal store fixes that without changing a line of userland code, and the same four-step pattern
 applies to any core subsystem or extension with process-global state to make coroutine-safe:
 allocate a key, create the state on first use, dispose of it on the coroutine's finish event, and
-resolve it through the current coroutine. The same treatment fits `gethostbyname()`, whose
+resolve it through the current coroutine. The same treatment fits ''gethostbyname()'', whose
 traditional static result buffer becomes per-coroutine state the same way.
 
 *Status: the store and its operations are implemented in the proof of concept. Converting the
-affected core subsystems, `ob_start()` among them, is follow-up work and is not part of this
+affected core subsystems, ''ob_start()'' among them, is follow-up work and is not part of this
 proposal.*
 
-### Microtasks
+==== Microtasks ====
 
 A microtask extends the scheduler's own behavior: a callable that runs inside the tick, between
 coroutine switches. It reaches the scheduler through the defer notification. It runs in the
@@ -514,36 +500,28 @@ spawns a replacement worker whenever the current one suspends, so exactly one co
 loop at a time. The destructor phase of garbage collection uses the same pattern while a
 scheduler is active: a worker coroutine runs the destructors, and a microtask watchdog replaces a
 worker that suspends. The worked-out code lives in the GC chapter of
-[core-integration.md](https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md).
+[[https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md|core-integration.md]].
 
-### Scheduler activity across the request lifecycle
+==== Scheduler activity across the request lifecycle ====
 
 Once registered, the scheduler is **always active**.
 
-- **Launch.** A scheduler registered from C launches immediately before the script code runs; one
-  registered during the script launches at its registration point.
-- **End of main.** When the main script ends, the engine hands control to the scheduler with the
-  end-of-main handover. After a normal completion the scheduler drains the remaining coroutines
-  and returns a fresh main coroutine. After an abnormal completion the same handover carries the
-  bailout flag, and the scheduler decides whether to finish or discard the remaining work; this is
-  its last opportunity to release resources before the request is torn down.
-- **After destructors.** Once object destructors have run, the scheduler receives one final
-  end-of-main handover, since destructors may have spawned coroutines. After it returns,
-  concurrency is terminated and the rest of the request shutdown is synchronous.
-- **exit().** A coroutine ending through `exit()` raises the shutdown notification, so concurrency
-  ends on the scheduler's terms rather than tearing the request down mid-flight.
+  * **Launch.** A scheduler registered from C launches immediately before the script code runs; one registered during the script launches at its registration point.
+  * **End of main.** When the main script ends, the engine hands control to the scheduler with the end-of-main handover. After a normal completion the scheduler drains the remaining coroutines and returns a fresh main coroutine. After an abnormal completion the same handover carries the bailout flag, and the scheduler decides whether to finish or discard the remaining work; this is its last opportunity to release resources before the request is torn down.
+  * **After destructors.** Once object destructors have run, the scheduler receives one final end-of-main handover, since destructors may have spawned coroutines. After it returns, concurrency is terminated and the rest of the request shutdown is synchronous.
+  * **exit().** A coroutine ending through ''exit()'' raises the shutdown notification, so concurrency ends on the scheduler's terms rather than tearing the request down mid-flight.
 
 Consequently, a script that spawns background work and reaches its final statement does not
 silently discard that work. The scheduler defines the semantics of the end of the request.
 
-### Process forking
+==== Process forking ====
 
-`fork()` and a live scheduler do not mix. Coroutines parked on a reactor, watcher descriptors and
+''fork()'' and a live scheduler do not mix. Coroutines parked on a reactor, watcher descriptors and
 worker threads cannot survive a fork of the process, so forking with a live scheduler produces a
 child in an incoherent state.
 
 This RFC therefore proposes that forking be restricted while a scheduler is registered:
-`pcntl_fork()` throws, as does any other extension path that forks the request process. The
+''pcntl_fork()'' throws, as does any other extension path that forks the request process. The
 default answer is no, and it is the engine that gives it, rather than each scheduler being trusted
 to guard itself.
 
@@ -552,11 +530,11 @@ typically the scheduler together with its reactor, registers a pair of handlers:
 the parent and decides whether this particular fork is permissible, and one that reinitializes
 state in the freshly forked child. With no such pair registered, forking is refused. The exact C
 interface is documented in
-[SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md).
+[[https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md|SCHEDULER.md]].
 
-*Status: proposed, not yet implemented in the proof of concept.*
+//Status: proposed, not yet implemented in the proof of concept.//
 
-## Backward Incompatible Changes
+===== Backward Incompatible Changes =====
 
 With no scheduler registered there are no behavior changes of any kind, and the engine adds no
 names to any namespace.
@@ -564,50 +542,49 @@ names to any namespace.
 While a scheduler is active, three behaviors change. All three follow from the engine having more
 than one flow, and all three are observable from PHP.
 
-### 1. `Fiber::suspend()` inside a destructor throws
+==== 1. ''Fiber::suspend()'' inside a destructor throws ====
 
 Under an active scheduler, the destructor phase of garbage collection runs in a dedicated
 coroutine rather than in whichever flow triggered collection. That coroutine is not a fiber, so
-`Fiber::suspend()` called from a destructor running in it throws
-`FiberError: Cannot suspend outside of a fiber`.
+''Fiber::suspend()'' called from a destructor running in it throws
+''FiberError: Cannot suspend outside of a fiber''.
 
 This breaks existing, tested behavior. The upstream test
-[`Zend/tests/fibers/destructors_001.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/fibers/destructors_001.phpt)
-does exactly this: it calls `gc_collect_cycles()` inside a fiber and suspends from a destructor.
+[[https://github.com/php/php-src/blob/master/Zend/tests/fibers/destructors_001.phpt|''Zend/tests/fibers/destructors_001.phpt'']]
+does exactly this: it calls ''gc_collect_cycles()'' inside a fiber and suspends from a destructor.
 Verified against the proof of concept: the test passes with no scheduler registered and fails
 under one, with the error above. The reference scheduler carries the adapted counterpart,
-`ext/test_scheduler/tests/026_dtor_fiber_suspend.phpt`, which asserts the throw.
+''ext/test_scheduler/tests/026_dtor_fiber_suspend.phpt'', which asserts the throw.
 
 The trade-off is deliberate. A destructor that can park an arbitrary flow is what makes the
 destructor phase unsafe once flows interleave, because the flow it parks is whichever one happened
 to allocate past a threshold. Running destructors in a known coroutine makes the phase
 predictable, at the cost of this pattern.
 
-### 2. `gc_collect_cycles()` gains new reasons to return `0`
+==== 2. ''gc_collect_cycles()'' gains new reasons to return ''0'' ====
 
-The return value keeps its type and its meaning, the number of collected cycles, and returning `0`
+The return value keeps its type and its meaning, the number of collected cycles, and returning ''0''
 from a reentrant call is existing behavior, unchanged. Under an active scheduler two new paths
-return `0`:
+return ''0'':
 
-- the collection ran on a dedicated coroutine and the calling coroutine was canceled while
-  waiting for it;
-- a coroutine for the collection could not be created.
+  * the collection ran on a dedicated coroutine and the calling coroutine was canceled while waiting for it;
+  * a coroutine for the collection could not be created.
 
-In both cases no collection result is available to report. Code that treats `0` as "there was
+In both cases no collection result is available to report. Code that treats ''0'' as "there was
 nothing to collect" will read these as the same thing.
 
-### 3. Forking the process is restricted while a scheduler is active
+==== 3. Forking the process is restricted while a scheduler is active ====
 
-See "Process forking". `pcntl_fork()` throws while a scheduler is registered, unless the scheduler
+See "Process forking". ''pcntl_fork()'' throws while a scheduler is registered, unless the scheduler
 has registered fork handlers that permit the specific case.
 
-*Status: proposed, not yet implemented in the proof of concept.*
+//Status: proposed, not yet implemented in the proof of concept.//
 
-## Proposed PHP Version(s)
+===== Proposed PHP Version(s) =====
 
 Next PHP 8.x (8.7 at the time of writing).
 
-## RFC Impact
+===== RFC Impact =====
 
 **To SAPIs.** None observable. CLI, FPM, phpdbg and embed gain the lifecycle points described
 above, all inert with no scheduler registered.
@@ -635,25 +612,23 @@ is active. Collection itself is unchanged.
 **php.ini Defaults.** None.
 
 **To Debuggers and Profilers.** A coroutine's execution context is built on the same machinery
-`Fiber` already uses, so step debugging and stack traces continue to work.
+''Fiber'' already uses, so step debugging and stack traces continue to work.
 
-## Open Issues
+===== Open Issues =====
 
 None yet.
 
-## Future Scope
+===== Future Scope =====
 
 This core is deliberately minimal. It is the foundation for follow-up work, none of which is
 proposed here:
 
-- **Asynchronous I/O.** A non-blocking I/O layer for sockets, files, DNS and timers, so that the
-  engine's blocking functions yield when a scheduler is active.
-- **Concurrency-safe core subsystems.** Converting `ob_start()`, `gethostbyname()` and their
-  neighbors to per-coroutine state.
-- **Threads.** A parallelism model that cooperates with the scheduler.
-- **Connection pooling.** Coroutine-aware pooling, for PDO among others.
+  * **Asynchronous I/O.** A non-blocking I/O layer for sockets, files, DNS and timers, so that the engine's blocking functions yield when a scheduler is active.
+  * **Concurrency-safe core subsystems.** Converting ''ob_start()'', ''gethostbyname()'' and their neighbors to per-coroutine state.
+  * **Threads.** A parallelism model that cooperates with the scheduler.
+  * **Connection pooling.** Coroutine-aware pooling, for PDO among others.
 
-## Voting Choices
+===== Voting Choices =====
 
 Requires a 2/3 majority.
 
@@ -661,44 +636,31 @@ Requires a 2/3 majority.
 
 Yes / No / Abstain
 
-## Patches and Tests
+===== Patches and Tests =====
 
-- **Proof of concept:** https://github.com/true-async/php-src/tree/async-core
-  The engine capabilities, the lifecycle points, the per-coroutine stores, and the changes to the
-  request lifecycle, the garbage collector and the fiber machinery.
-- **Pull request:** https://github.com/php/php-src/pull/22561
-- **Reference C scheduler:**
-  [ext/test_scheduler](https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler),
-  an in-tree extension filling every slot from outside the engine,
-  disabled by default so that the upstream test suite runs unchanged in the same binary. It is the
-  runtime proof that the capabilities are implementable by an extension, and it carries its own
-  test suite exercising every notification, the switch contract and the per-coroutine stores.
-- **Reference production scheduler:** https://github.com/true-async/true-async
-- **Scheduler bridge for PHP:** https://github.com/true-async/ext-scheduler-hook, the separate
-  extension mentioned in "Scope", not part of this proposal.
+  * **Proof of concept:** https://github.com/true-async/php-src/tree/async-core The engine capabilities, the lifecycle points, the per-coroutine stores, and the changes to the request lifecycle, the garbage collector and the fiber machinery.
+  * **Pull request:** https://github.com/php/php-src/pull/22561
+  * **Reference C scheduler:** [[https://github.com/true-async/php-src/tree/async-core/ext/test_scheduler|ext/test_scheduler]], an in-tree extension filling every slot from outside the engine, disabled by default so that the upstream test suite runs unchanged in the same binary. It is the runtime proof that the capabilities are implementable by an extension, and it carries its own test suite exercising every notification, the switch contract and the per-coroutine stores.
+  * **Reference production scheduler:** https://github.com/true-async/true-async
+  * **Scheduler bridge for PHP:** https://github.com/true-async/ext-scheduler-hook, the separate extension mentioned in "Scope", not part of this proposal.
 
-## Implementation
+===== Implementation =====
 
 To be filled in after acceptance: merged version, commit links, manual entries.
 
-## References
+===== References =====
 
-- [Polling API RFC](https://wiki.php.net/rfc/poll_api): readiness multiplexing accepted for PHP
-  8.6, the natural I/O source for a scheduler.
-- [Fibers RFC](https://wiki.php.net/rfc/fibers): the low-level primitive this builds on.
-- [True Async RFC](https://wiki.php.net/rfc/true_async): a complete concurrency model built on
-  this core.
-- [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md): the
-  C-level interface, for implementers.
-- [core-integration.md](https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md):
-  every place the integration touches php-src, file by file.
-- [reactor.md](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md): the
-  reactor's C-level interface.
+  * [[https://wiki.php.net/rfc/poll_api|Polling API RFC]]: readiness multiplexing accepted for PHP 8.6, the natural I/O source for a scheduler.
+  * [[https://wiki.php.net/rfc/fibers|Fibers RFC]]: the low-level primitive this builds on.
+  * [[https://wiki.php.net/rfc/true_async|True Async RFC]]: a complete concurrency model built on this core.
+  * [[https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md|SCHEDULER.md]]: the C-level interface, for implementers.
+  * [[https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md|core-integration.md]]: every place the integration touches php-src, file by file.
+  * [[https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md|reactor.md]]: the reactor's C-level interface.
 
-## Rejected Features
+===== Rejected Features =====
 
 None.
 
-## Changelog
+===== Changelog =====
 
-- **0.9**: initial draft.
+  * **0.9**: initial draft.
