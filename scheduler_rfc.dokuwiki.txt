@@ -7,7 +7,7 @@
   * **First Published at:** https://wiki.php.net/rfc/async_scheduler_abi
   * **Implementation:** https://github.com/true-async/php-src/tree/async-core
   * **Pull request:** https://github.com/php/php-src/pull/22561
-  * **Discussion thread:** tbd
+  * **Discussion thread:** https://news-web.php.net/php.internals/132091
   * **Voting thread:** tbd
 
 ===== Introduction =====
