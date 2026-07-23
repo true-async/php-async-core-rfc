@@ -630,11 +630,13 @@ proposed here:
 
 ===== Voting Choices =====
 
-Requires a 2/3 majority.
+Primary vote, requiring a 2/3 majority to accept the RFC:
 
-> Implement Concurrency Support in the PHP Engine as outlined in the RFC?
-
-Yes / No / Abstain
+<doodle title="Implement Concurrency Support in the PHP Engine as outlined in the RFC?" voteType="single" closed="true" closeon="2026-09-01T00:00:00Z">
+   * Yes
+   * No
+   * Abstain
+</doodle>
 
 ===== Patches and Tests =====
 
