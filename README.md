@@ -14,7 +14,6 @@ With no scheduler registered, PHP behaves exactly as it does today.
 | **[scheduler_rfc.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc.md)** | **PHP RFC: Concurrency Support in the PHP Engine.** The notifications, the granted operations, per-coroutine state and the request lifecycle changes. Start here. |
 | [SCHEDULER.md](https://github.com/true-async/php-async-core-rfc/blob/main/SCHEDULER.md) | The C-level interface and the exact engine invocation points, for scheduler implementers. |
 | [core-integration.md](https://github.com/true-async/php-async-core-rfc/blob/main/core-integration.md) | Every place the integration touches php-src, file by file. |
-| [scheduler_rfc_examples.md](https://github.com/true-async/php-async-core-rfc/blob/main/scheduler_rfc_examples.md) | Worked examples with real code: per-coroutine contexts (`ob_start()`, `gethostbyname()`) and the microtask-driven concurrent iterator. |
 | [reactor.md](https://github.com/true-async/php-async-core-rfc/blob/main/reactor.md) | Reactor C interface, a discussion draft: a callback-first `io_*` API (poll, streaming IO, timers, filesystem, DNS) and how it feeds the scheduler. Not an RFC. |
 
 ## Implementation
