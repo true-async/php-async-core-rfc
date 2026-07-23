@@ -691,7 +691,8 @@ This breaks existing, tested behavior. The upstream test
 [`Zend/tests/fibers/destructors_001.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/fibers/destructors_001.phpt)
 does exactly this: it calls `gc_collect_cycles()` inside a fiber and suspends from a destructor.
 Verified against the proof of concept: the test passes with no scheduler registered and fails
-under one, with the error above.
+under one, with the error above. The reference scheduler carries the adapted counterpart,
+`ext/test_scheduler/tests/026_dtor_fiber_suspend.phpt`, which asserts the throw.
 
 The trade-off is deliberate. A destructor that can park an arbitrary flow is what makes the
 destructor phase unsafe once flows interleave, because the flow it parks is whichever one happened
