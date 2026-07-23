@@ -53,7 +53,7 @@ Initializes the Async API globals, next to `gc_globals_ctor()`. The API
 slots and `zend_async_globals_t` must exist before extension MINIT, because
 the scheduler registers itself in the MINIT of test_scheduler / ext-async.
 
-### main.c:2861, `php_tsrm_startup_ex()`: TSRM block size
+### main.c:2859, `php_tsrm_startup_ex()`: TSRM block size
 
 `sizeof(zend_async_globals_t)` is accounted for in the preallocated ZTS
 globals block. Under ZTS all globals live in one aligned block; without
@@ -125,7 +125,7 @@ extension is going away; no pointer may outlive it.
 
 ---
 
-## Zend/zend.c:1983, `zend_execute_script()`: deferred uncaught report
+## Zend/zend.c:1986, `zend_execute_script()`: deferred uncaught report
 
 An uncaught exception after `zend_execute()` is reported as a fatal
 immediately **only if** `ZEND_ASYNC_CURRENT_COROUTINE == NULL`. When the
@@ -137,7 +137,7 @@ blocks. Instead the exception stays in EG(exception), rides down to
 
 ---
 
-## Zend/zend_globals.h:171-196: `zend_shutdown_context_t` in EG
+## Zend/zend_globals.h:172-188: `zend_shutdown_context_t` in EG
 
 A small cursor struct {is_started, coroutine, idx} in the executor globals,
 shared by the two shutdown destructor passes (`shutdown_destructors()` and
@@ -150,7 +150,7 @@ lives in EG, not in the extension.
 
 ## Zend/zend_execute_API.c: `shutdown_destructors()` (the symbol table)
 
-### zend_execute_API.c:284-288: subscribing the switch handler
+### zend_execute_API.c:284-289: subscribing the switch handler
 
 If the pass runs inside a coroutine, a
 `shutdown_destructors_switch_handler` is attached to it via
@@ -159,7 +159,7 @@ and a microtask is no good here: this late in shutdown the next tick may
 never come. A hook on the context switch itself is the only synchronous
 moment where the suspend can be noticed.
 
-### zend_execute_API.c:260-280: the switch handler spawns an iterator
+### zend_execute_API.c:258-282: the switch handler spawns an iterator
 
 On leaving the coroutine (is_enter=false), if the pass has started and is
 not finished, an internal iterator coroutine is created via
@@ -168,7 +168,7 @@ EG(shutdown_context).idx) and enqueued. A suspended destructor parks the
 pass's coroutine, so the pass itself is carried on by an independent
 iterator. The handler returns false: it is one-shot.
 
-### zend_execute_API.c:332-335: suspend detection in the loop
+### zend_execute_API.c:334-337: suspend detection in the loop
 
 After each destructor the pass checks
 `coroutine != ZEND_ASYNC_CURRENT_COROUTINE`. If the current coroutine
@@ -214,7 +214,7 @@ the coroutine holds a reference to the fiber, the fiber holds none back
 (apart from a +1 on the coroutine's zend_object, see below), so no cycle is
 created.
 
-### zend_fibers.c:971-1002: `zend_fiber_adopt()`
+### zend_fibers.c:988-1019: `zend_fiber_adopt()`
 
 At fiber start the core offers it to the scheduler via
 `ZEND_ASYNC_INTERCEPT_FIBER(fiber)`. The scheduler answers with a coroutine,
@@ -223,20 +223,20 @@ itself. The coroutine gets `internal_entry = zend_fiber_coroutine_entry`,
 `extended_data = fiber` and the `ZEND_COROUTINE_SET_FIBER` flag; the fiber
 takes +1 on the coroutine's zend_object.
 
-### zend_fibers.c:1005-1022: `zend_fiber_coroutine_start()`
+### zend_fibers.c:1022-1039: `zend_fiber_coroutine_start()`
 
 The fiber's body is packed into an fcall (`ZEND_ASYNC_FCALL_DEFINE`), the
 coroutine is enqueued (`ZEND_ASYNC_ENQUEUE_COROUTINE`), and the caller
 waits for the first yield via `zend_fiber_await()`.
 
-### zend_fibers.c:917-966: `zend_fiber_await()`
+### zend_fibers.c:934-983: `zend_fiber_await()`
 
 The caller records itself in `fiber->caller_coroutine` and parks with
 `ZEND_ASYNC_SUSPEND()`. An error or cancellation while parking yields
 FAILURE, with the prev_execute_data chain severed (otherwise GC walks a
 dead frame). Self-await is caught before parking.
 
-### zend_fibers.c:869-913: `zend_fiber_coroutine_yield()` (Fiber::suspend)
+### zend_fibers.c:882-930: `zend_fiber_coroutine_yield()` (Fiber::suspend)
 
 The value goes into `fiber->transfer`, the caller is woken with
 `ZEND_ASYNC_ENQUEUE_COROUTINE`, and the fiber parks with
@@ -245,13 +245,23 @@ The value goes into `fiber->transfer`, the caller is woken with
 force-closed, in which case extended_data is already NULL and a graceful
 exit flies out.
 
-### zend_fibers.c:840-867: the body finishing (`zend_fiber_coroutine_entry` tail)
+### zend_fibers.c:848-878: the body finishing (`zend_fiber_coroutine_entry` tail)
 
 An exception that escaped the body is delivered to the caller with
 `ZEND_ASYNC_ENQUEUE_WITH_ERROR` (ownership is transferred); a normal finish
 wakes the caller with `ZEND_ASYNC_ENQUEUE_COROUTINE`.
 
-### zend_fibers.c:1312-1335: `Fiber::suspend()` (userland)
+`exit()` is the one exception delivered nowhere: at 852-853 an unwind exit
+raises `ZEND_ASYNC_SHUTDOWN()`, the only call site of the shutdown
+notification in the tree. The test is `zend_is_unwind_exit`, not
+`zend_is_graceful_exit`: a graceful exit is the disposal unwind of a
+force-closed fiber and must shut nothing down. `exit()` in the main flow
+never reaches this tail; main leaves through the end-of-main handover with
+the bailout flag (main.c:2685), so the notification stays specific to a
+coroutine that ends the request from inside. Tests: 064-067 in
+ext/test_scheduler/tests.
+
+### zend_fibers.c:1346-1404: `Fiber::suspend()` (userland)
 
 Dispatch on the current coroutine. If there is one and it is a fiber
 coroutine, yield through the scheduler; not a fiber, FiberError "Cannot
@@ -260,13 +270,13 @@ suspend outside of a fiber"; force-closed or cancelled
 force-closed fiber". A legacy fiber (active with no coroutine) takes the
 old path.
 
-### zend_fibers.c:1385-1398 / 1429: `Fiber::resume()` / `Fiber::throw()`
+### zend_fibers.c:1406 / 1450: `Fiber::resume()` / `Fiber::throw()`
 
 In coroutine mode: `ZEND_ASYNC_ENQUEUE_COROUTINE` /
 `ZEND_ASYNC_ENQUEUE_WITH_ERROR` plus `zend_fiber_await()` instead of a
 direct context switch.
 
-### zend_fibers.c:752-773: `zend_fiber_release_coroutine()`
+### zend_fibers.c:757-778: `zend_fiber_release_coroutine()`
 
 When the Fiber object dies before its coroutine, the unfinished coroutine
 is force-closed: `ZEND_ASYNC_CANCEL(coroutine, graceful_exit, true)`.
@@ -487,69 +497,23 @@ the launch on, so the script's store is simply the main coroutine's store.
 
 ---
 
-## ext/async_scheduler_hook: the PHP registration bridge
+## The PHP registration bridge: out of tree
 
-The userland face of the hook layer, an optional in-tree extension
-(`--enable-async-scheduler-hook`, static or shared):
-`Async\SchedulerHook::register()`, the `Async\Scheduler` interface
-(onLaunch / onShutdown / onFiber / onEnqueue / onSuspend / onDefer), and
-the `Async\Context` / `Async\get_context()` surface over the engine's
-context storage. Each engine slot is backed by a C thunk that forwards to
-the bound scheduler method. The extension talks to the engine exclusively
-through exported `ZEND_API`, which is the runtime proof that the ABI seam
-is sufficient for a PHP-facing provider.
+The userland face of the seam (`Async\SchedulerHook::register()`, an
+`Async\Scheduler` interface, and the `Async\Context` / `Async\get_context()`
+surface over the engine's context storage) used to live in the tree as
+`Zend/zend_scheduler_hook.*` plus `ext/async_scheduler_hook`. It has been
+extracted to its own repository,
+[ext-scheduler-hook](https://github.com/true-async/ext-scheduler-hook), and
+the engine now compiles in no PHP symbols at all.
 
-The lifecycle maps onto the standard module hooks, which bracket the
-executor shutdown exactly as the teardown needs. MINIT registers the
-classes and the context factory. RSHUTDOWN, which runs before
-`shutdown_executor()`, drops the handler container (it owns objects the
-store would otherwise report as leaked) and unregisters the scheduler.
-`ZEND_MODULE_POST_ZEND_DEACTIVATE`, which runs after, sweeps the
-coroutine-handle map, once every coroutine object has taken its handle with
-it.
+Nothing engine-side was lost in the move: the bridge talked to the core
+exclusively through exported `ZEND_API`, which is why it can build as an
+ordinary out-of-tree extension. That it still works unchanged is the
+runtime proof that the ABI seam is sufficient for a PHP-facing provider,
+without the engine owning a single name for it.
 
-The model is coroutine-centric: everything is keyed by the scheduler's own
-coroutine objects, and the execution context behind one is engine-internal.
-There is no public Continuation. The mandate is three real closures over
-internal functions registered in no function table; only the factory ever
-receives them, so the capability cannot leak:
-
-- `bindEntry(object $coroutine, callable $entry): void` gives one of the
-  scheduler's own coroutines its body;
-- `switchTo(object $coroutine, mixed $value = null, ?Throwable $error =
-  null): mixed` is the one symmetric switch path: main, adopted fibers (the
-  engine runs their C bodies itself) and the scheduler's own coroutines
-  alike. Value and error ride the RFC transfer contract; completion returns
-  to the last switcher;
-- `currentCoroutine(): ?object`.
-
-Contract points implemented here:
-
-- **onLaunch** returns the main coroutine (main is a coroutine from its
-  first opcode). Its handle borrows the engine's own context, so switching
-  into main wakes the script wherever it parked.
-- **The end-of-main handover replaces the main.** `onSuspend(fromMain:
-  true)` marks the old main FINISHED (index.php really ended) and must
-  return a fresh main coroutine, recorded as the new main and the current
-  one; returning the finished main is an Error. Two handovers per request.
-- **No onWaitInfo** (the awaiting-info vector took its place) and **no
-  onResume** (enqueue and resume are one hook; cancel is the same hook with
-  an error).
-
-Mechanics worth knowing. The bridge mints a C-visible `zend_coroutine_t`
-handle per coroutine object (`ZEND_COROUTINE_F_OBJ_REF`: the handle lives
-in its own allocation and points at the object); the handle dies with the
-object through a wrapped `free_obj`, and it also carries the execution
-context, the bound entry and the pending error. The engine learns the
-current coroutine only from the return value of onLaunch/onSuspend, and the
-flow identity is restored after every switchTo returns, so
-`currentCoroutine()` is always honest. A non-Throwable error (the
-graceful/unwind exit markers) cannot cross the PHP hook boundary: it parks
-on the handle and the suspend thunk throws it C-side.
-
----
-
-## Testing strategy: two providers in one binary
+## Testing strategy
 
 - test_scheduler is gated by `test_scheduler.enable` (PHP_INI_SYSTEM,
   default **0**): the extension loads but claims no scheduler slots unless
@@ -561,9 +525,11 @@ on the handle and the suspend thunk throws it C-side.
 - Tests whose behaviour legitimately differs under a scheduler are
   **duplicated** into ext/test_scheduler/tests (026-059, descriptive names)
   with `--INI-- test_scheduler.enable=1` and the scheduler-adapted EXPECTs.
-- The bridge and context tests live in ext/async_scheduler_hook/tests. They
-  register a PHP scheduler, and a SKIPIF guards against a binary where a C
-  scheduler already took the slot.
+- 060-067 cover the paths that have no upstream counterpart: spawn failure,
+  and the shutdown notification on `exit()`.
+- The bridge and context tests moved out with the bridge and now live in
+  the [ext-scheduler-hook](https://github.com/true-async/ext-scheduler-hook)
+  repository, where they register a scheduler written in plain PHP.
 
 ---
 
@@ -571,25 +537,25 @@ on the handle and the suspend thunk throws it C-side.
 
 | File | Lines | What |
 |---|---|---|
-| main/main.c | 2259, 2861 | API globals: ctor + slot in the TSRM block |
+| main/main.c | 2259, 2859 | API globals: ctor + slot in the TSRM block |
 | main/main.c | 2671 | scheduler launch before the script |
 | main/main.c | 2683, 2685 | drain after main (normal / bailout) |
 | main/main.c | 2000-2007 | drain at request shutdown + consuming EG |
 | main/main.c | 2010, 2583 | deactivation; zeroing the API slots |
-| Zend/zend.c | 1983 | deferred uncaught report while the drain is still ahead |
-| Zend/zend_globals.h | 171-196 | cursor of the shutdown destructor passes |
-| Zend/zend_execute_API.c | 260-335 | shutdown_destructors: switch handler + iterator |
+| Zend/zend.c | 1986 | deferred uncaught report while the drain is still ahead |
+| Zend/zend_globals.h | 172-188 | cursor of the shutdown destructor passes |
+| Zend/zend_execute_API.c | 258-337 | shutdown_destructors: switch handler + iterator |
 | Zend/zend_objects_API.c | 93-168 | same for the object store + fiber/coroutine skip (active-only) |
 | Zend/zend_async_API.h/.c | — | the ABI, the internal context (embedded), the userland context struct + ops |
-| ext/async_scheduler_hook | — | the PHP bridge: SchedulerHook, Scheduler, Context, get_context() |
 | ext/test_scheduler | — | the C reference scheduler (test_scheduler.enable, default off) |
 | Zend/zend_fibers.h | 147-154 | coroutine-mode fields in zend_fiber |
-| Zend/zend_fibers.c | 971-1022 | fiber adoption, start as a coroutine |
-| Zend/zend_fibers.c | 869-966 | yield/await via SUSPEND/ENQUEUE |
-| Zend/zend_fibers.c | 1312-1429 | Fiber::suspend/resume/throw dispatch |
-| Zend/zend_fibers.c | 752-773 | force-closing the coroutine when the Fiber object dies |
+| Zend/zend_fibers.c | 988-1039 | fiber adoption, start as a coroutine |
+| Zend/zend_fibers.c | 882-983 | yield/await via SUSPEND/ENQUEUE |
+| Zend/zend_fibers.c | 1346-1450 | Fiber::suspend/resume/throw dispatch |
+| Zend/zend_fibers.c | 757-778 | force-closing the coroutine when the Fiber object dies |
+| Zend/zend_fibers.c | 848-878 | body finish: error to the caller; unwind exit raises SHUTDOWN |
 | Zend/zend_fibers.c | 1156-1173 | GC: a live fiber is a root; the coroutine edge after finish |
-| Zend/zend_fibers.c | 573-603 | error_reporting: empty string = E_ALL |
+| Zend/zend_fibers.c | 553-603 | error_reporting: empty string = E_ALL |
 | Zend/zend_gc.c | 2201-2237 | synchronous gc_collect_cycles over the GC coroutine; TMPVAR re-root on both outcomes |
 | Zend/zend_gc.c | 2016-2170 | destructor phase: iterators + microtask + finish handler |
 | Zend/zend_gc.c | 1885-1932 | destructor suspend detection |

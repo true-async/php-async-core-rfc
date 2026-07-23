@@ -79,6 +79,53 @@ to the user.
 
 ## Proposal
 
+### What becomes possible, and what does not
+
+This proposal is a mechanism rather than a concurrency model. It determines what a scheduler
+extension can build, what remains separate work, and what the mechanism cannot provide. The table
+lists all three.
+
+| Capability | Status | What it rests on |
+|---|---|---|
+| Stackful coroutines | Provided | A coroutine owns an execution context, so it can suspend at any call depth. |
+| Direct transfer between coroutines | Provided | The granted switch operation, described in goal 5. |
+| Adopting `Fiber`-based libraries onto one schedule | Provided | The foreign-fiber notification, described in goal 4. |
+| Per-coroutine state for core functions and extensions | Provided, storage only | The two per-coroutine stores are part of this proposal; converting `ob_start()` and its neighbors to use them is follow-up work. |
+| Transparent asynchrony, with no function coloring | Buildable | A function written to suspend can do so at any call depth, and no `async` marker travels up the call chain. Which functions suspend is up to the I/O layer and the extensions: until those exist, the engine's blocking calls block the whole thread, coroutines included. |
+| An `async`/`await` surface with colored functions | Buildable | Transparency is not mandatory. An await-style surface over the same switching primitive is equally buildable, and both can coexist in one process. |
+| Non-blocking I/O, timers, DNS | Outside this RFC | The proposal defines the scheduler seam. The I/O layer and the reactor behind it are separate work. |
+| Preemption of a running coroutine | Outside this RFC | Every switch this proposal defines is explicit. A scheduler could build preemption on the engine's existing interrupt machinery, which this proposal neither provides nor precludes. |
+| Goroutine-style coroutines | Not provided | Multiplexing coroutines across OS threads requires threads that share one object store, which PHP's per-thread runtime does not have. See below. |
+| Parallel execution of PHP code | Not provided | Everything described here runs in one OS thread and interleaves cooperatively. Parallelism through processes or isolated interpreters is unaffected. |
+
+**Why not goroutines.** A goroutine is two things at once: a stackful coroutine, and a scheduler
+that spreads such coroutines across a pool of OS threads. This proposal supplies the first half.
+The second rests on a runtime where several threads execute one program over shared memory, and
+PHP is not that runtime: each thread owns its object store, its globals and its memory manager,
+and reference counting on values is non-atomic, so making it thread-safe would put a synchronized
+operation on nearly every assignment, copy and destruction of a value. Moving a live coroutine
+from one thread to another would therefore move values the destination thread cannot legally
+touch. The limit belongs to the runtime rather than to the mechanism proposed here: an M:N
+scheduler would need a different memory model first, which is a much larger question than a
+scheduler seam.
+
+**What it changes for the existing ecosystem.** ReactPHP, Revolt and AMPHP already deliver working
+concurrency on top of fibers, and this RFC requires nothing from them. What becomes available is
+engine-level. A fiber started by any of them is offered to the registered scheduler through the
+foreign-fiber notification, so it can be driven by the same scheduler that runs every other
+coroutine in the process, and a scheduler that declines leaves today's behavior exactly as it is.
+Per-coroutine state for engine and extension internals can only be kept by the engine: no library
+can make `ob_start()` or `gethostbyname()` hold their state per flow, because that state sits in
+globals no library owns.
+
+**What can be built on top.** A long-lived PHP server needs a flow per connection, a way to park a
+flow and wake it, and per-flow state that does not leak between connections. This proposal
+supplies the flows and the state; an extension supplies the loop and the protocol. Both halves
+already exist over the proof-of-concept engine: the
+[TrueAsync server](https://github.com/true-async/server) implements HTTP and gRPC serving as a PHP
+extension, and a [FrankenPHP fork](https://github.com/true-async/frankenphp) runs its workers on
+coroutines. Neither is proposed here.
+
 ### Scheduler ABI
 
 The engine and the scheduler exchange two things: coroutines, and control transferred between
