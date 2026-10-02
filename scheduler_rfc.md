@@ -293,7 +293,10 @@ low-level fiber.
 **Engine guarantees:** when the fiber is adopted, the engine owns its body and runs it like any
 other coroutine. The fiber's operations become scheduler policy: `start()`, `resume()` and
 `throw()` park their value or exception, enqueue the adopted coroutine, and yield to the
-scheduler rather than switching into the fiber immediately.
+scheduler rather than switching into the fiber immediately. While the scheduler runs its own
+work rather than a coroutine, `Fiber::start()`, `resume()`, `throw()` and `suspend()` throw
+`FiberError` before changing any state, as they do where switching is blocked: there is no
+coroutine to park, and a switch would take the scheduler out of its own loop.
 **Scheduler must:** decide per fiber. A scheduler that creates fibers for its own use must
 decline them, or it would recurse into itself; it recognizes them by keeping its own private set,
 since the engine tracks nothing here and no outside code can mark a fiber as internal.
@@ -596,14 +599,17 @@ predictable, at the cost of this pattern.
 ### 2. `gc_collect_cycles()` gains new reasons to return `0`
 
 The return value keeps its type and its meaning, the number of collected cycles, and returning `0`
-from a reentrant call is existing behavior, unchanged. Under an active scheduler two new paths
+from a reentrant call is existing behavior, unchanged. Under an active scheduler three new paths
 return `0`:
 
 - the collection ran on a dedicated coroutine and the calling coroutine was canceled while
   waiting for it;
-- a coroutine for the collection could not be created.
+- a coroutine for the collection could not be created;
+- the call came from code that cannot wait, such as a tick function, a signal handler or
+  the scheduler's own work: the collection is started on its coroutine and runs when the
+  scheduler next picks it.
 
-In both cases no collection result is available to report. Code that treats `0` as "there was
+In all three cases no collection result is available to report. Code that treats `0` as "there was
 nothing to collect" will read these as the same thing.
 
 ### 3. Forking the process is restricted while a scheduler is active
