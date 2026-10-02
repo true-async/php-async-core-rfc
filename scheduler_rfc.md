@@ -135,8 +135,12 @@ the coroutine object. The coroutine is the schedulable unit on top of it, adding
 result or unhandled exception, and cancellation. The engine, the notifications and the
 operations all work in terms of coroutines. No lower-level primitive is exposed.
 
-Two orthogonal attributes may additionally apply: *canceled*, meaning cancellation has been
-requested, and *main*, meaning the coroutine that wraps the top-level script. Each coroutine
+Three orthogonal attributes may additionally apply: *canceled*, meaning cancellation has been
+requested; *main*, meaning the coroutine that wraps the top-level script; and *started*, meaning
+the body began executing. The state cannot say the last one: a coroutine waiting for its first
+run and one that yielded are both queued. The scheduler sets *started* immediately before the
+body's first instruction, the main coroutine's included, and never for a coroutine whose first
+entry carries an error, so a coroutine canceled before it ran never started. Each coroutine
 records its completion result or unhandled exception, the source location at which it was spawned,
 and, while suspended, descriptions of what it is waiting for. Those awaiting-info registrations
 are attached by the code that suspends the coroutine and are wiped as a whole when it is enqueued
@@ -258,14 +262,19 @@ accepted, for example during shutdown.
 it. At a PHP-visible boundary the engine converts a rejection into a thrown `Error`, for instance
 on `Fiber::resume()` against an adopted fiber.
 **Scheduler must:** deliver the error, when present, through the error parameter of the switch
-operation.
-**Errors:** a `false` return is a quiet rejection and not an error. A C caller such as a reactor
-callback observes it, disposes of the error it was delivering, and treats the coroutine as never
-scheduled.
+operation, and refuse a finished coroutine, which cannot run again.
+**Errors:** enqueue of a finished coroutine returns `false` with an `Error` thrown, and the
+error it was given is released. Any other `false` return is a quiet rejection and not an
+error. A C caller such as a reactor callback observes it, disposes of the error it was
+delivering, and treats the coroutine as never scheduled.
 
 ```php
 public function onEnqueue(object $coroutine, ?\Throwable $error = null): bool
 {
+    if ($coroutine->isFinished()) {
+        throw new \Error('Cannot enqueue a finished coroutine');
+    }
+
     if ($this->shuttingDown) {
         return false;                     // quiet rejection; the caller observes it
     }
