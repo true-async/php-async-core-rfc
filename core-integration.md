@@ -23,11 +23,14 @@ The key contracts everything else builds on:
   the waiter with a direct symmetric switch instead of the run queue, and
   marks the outcome as observed, so an awaited exception is not "unhandled".
 - `zend_coroutine_finish_handler_fn`: the coroutine-end handler. It fires
-  exactly once, no matter how the coroutine ends (return, exception,
-  cancellation, bailout unwind), and carries the `waiter`/`data` stored at
-  registration time plus the `is_bailout` flag ("the scheduler is dying,
-  clean up only, schedule nothing"). This is the mechanism GC uses to wait
-  for its iterators.
+  at most once, no matter how the coroutine ends (return, exception,
+  cancellation, bailout unwind). A handler that throws may end the
+  notify: the provider is free to drop the handlers after it, uncalled, so
+  a handler that must fire belongs on a coroutine whose handlers its owner
+  controls, as the GC's do. The handler receives the `waiter`/`data` stored
+  at registration time plus the `is_bailout` flag ("the scheduler is
+  dying, clean up only, schedule nothing"). This is the mechanism GC uses
+  to wait for its iterators.
 - `zend_coroutine_switch_handler_fn`: a synchronous hook on every coroutine
   enter and leave. The shutdown destructor passes use it to notice a
   destructor suspending right at the context switch.
@@ -396,9 +399,11 @@ The scheme (the header comment at zend_gc.c:2019-2036):
    disarming live at 2074-2101, refcounting via
    `ZEND_ASYNC_MICROTASK_ADDREF/RELEASE`, scheduling via
    `ZEND_ASYNC_DEFER`.
-5. `gc_destructors_finish_handler` (2043-2058) fires exactly once at the
-   end of **every** iterator, bailout unwinds included (the finish handler
-   contract): `dtor_pending--`; at zero, `dtor_coroutine = NULL` and, if
+5. `gc_destructors_finish_handler` (2043-2058) fires at the end of
+   **every** iterator, bailout unwinds included: it is that iterator's
+   only finish handler (nobody awaits an iterator; the GC coroutine is
+   woken by enqueue), so no throwing handler can end the notify before
+   it. `dtor_pending--`; at zero, `dtor_coroutine = NULL` and, if
    not a bailout, `ZEND_ASYNC_ENQUEUE_COROUTINE(GC_G(gc_coroutine))` wakes
    the GC coroutine to continue the collection. On a bailout there is
    nobody left to wake, but the counter and the globals stay clean.
@@ -417,22 +422,26 @@ the coroutine changed, the destructor suspended: the iterator breaks off
 microtask's business. Symmetric to the old fiber detection (1913,
 `dtor_fiber`).
 
-## zend_gc.c:2339-2352: handling the destructor phase outcome
+## `zend_gc_collect_cycles()`: handling the destructor phase outcome
 
-When `gc_call_destructors_in_coroutine()` returns false (the parking fell
-through), the GC rerun is cancelled **unconditionally**
-(`should_rerun_gc = false`, 2344): a cancelled GC coroutine cannot park
+The branch after `gc_call_destructors_in_coroutine()`: when it returns
+false (the parking fell through) with an exception pending, the GC rerun is
+cancelled (`should_rerun_gc = false`): a cancelled GC coroutine cannot park
 again, and a rerun would only spawn an orphan iterator over an
 already-reset buffer, a UAF risk (closed by the 2026-07-15 review, test
 021_gc_deadlock). If EG(exception) is an instance of
-`ZEND_ASYNC_GET_EXCEPTION_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION)`, the
+`ZEND_ASYNC_GET_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION)`, the
 cancellation class the scheduler provides, it is additionally silenced: the
 GC coroutine was cancelled (e.g. a terminal deadlock), and that is not a GC
 error. Then the GC_DTOR_GARBAGE tags left behind by the unfinished iterator
-are cleaned up.
+are cleaned up. An iterator the scheduler cannot create or queue leaves no
+exception (`gc_spawn_destructors_coroutine()` clears the enqueue error, which
+the GC coroutine's await would drop unseen): only the tags are cleaned, and
+the run is redone with the destructors called.
 
-This is the only place in the core that uses `ZEND_ASYNC_GET_EXCEPTION_CE`:
-the core needs the cancellation exception class without knowing its name.
+This is the only place in the core that asks for an exception class through
+`ZEND_ASYNC_GET_CE`: the core needs the cancellation exception class without
+knowing its name.
 
 ## Parked coroutine stacks (the former "theoretical hole", resolved as a non-issue)
 
@@ -563,4 +572,4 @@ without the engine owning a single name for it.
 | Zend/zend_gc.c | 2201-2237 | synchronous gc_collect_cycles over the GC coroutine; TMPVAR re-root on both outcomes |
 | Zend/zend_gc.c | 2016-2170 | destructor phase: iterators + microtask + finish handler |
 | Zend/zend_gc.c | 1885-1932 | destructor suspend detection |
-| Zend/zend_gc.c | 2339-2358 | phase outcome: no rerun, silencing the cancellation, tag cleanup |
+| Zend/zend_gc.c | 2402-2425 | phase outcome: no rerun, silencing the cancellation, tag cleanup |

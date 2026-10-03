@@ -574,8 +574,8 @@ interface is documented in
 With no scheduler registered there are no behavior changes of any kind, and the engine adds no
 names to any namespace.
 
-While a scheduler is active, three behaviors change. All three follow from the engine having more
-than one flow, and all three are observable from PHP.
+While a scheduler is active, four behaviors change. All four follow from the engine having more
+than one flow, and all four are observable from PHP.
 
 ### 1. `Fiber::suspend()` inside a destructor throws
 
@@ -604,7 +604,8 @@ return `0`:
 
 - the collection ran on a dedicated coroutine and the calling coroutine was canceled while
   waiting for it;
-- a coroutine for the collection could not be created;
+- a coroutine for the collection could not be created, or the one for its destructor phase
+  could not be queued;
 - the call came from code that cannot wait, such as a tick function, a signal handler or
   the scheduler's own work: the collection is started on its coroutine and runs when the
   scheduler next picks it.
@@ -612,12 +613,34 @@ return `0`:
 In all three cases no collection result is available to report. Code that treats `0` as "there was
 nothing to collect" will read these as the same thing.
 
+When the scheduler cannot queue the collection's coroutine, the scheduler's error is thrown instead
+of a result, and not only from an explicit `gc_collect_cycles()`: a collection the engine starts
+itself when its root buffer fills throws it from whatever statement released the last root, such as
+an `unset()` or an assignment.
+
 ### 3. Forking the process is restricted while a scheduler is active
 
 See "Process forking". `pcntl_fork()` throws while a scheduler is registered, unless the scheduler
 has registered fork handlers that permit the specific case.
 
 *Status: proposed, not yet implemented in the proof of concept.*
+
+### 4. A fiber parked in `Fiber::suspend()` is ended by the scheduler, not collected
+
+Under an active scheduler a started fiber runs as a coroutine. While it is parked in
+`Fiber::suspend()`, `gc_collect_cycles()` does not collect it when the cycle that keeps it alive
+runs through its body's closure: the coroutine holds the closure, and a parked fiber keeps its
+coroutine out of the collector's view, since the scheduler holds references to it that the collector
+cannot count. The fiber goes when its body finishes, or when the scheduler ends it after the
+script with a graceful exit thrown at its `Fiber::suspend()`.
+
+Two things are observable. Destructors of the objects such a fiber keeps alive run after the
+script's last output instead of inside `gc_collect_cycles()`. And a generator the fiber is
+suspended in is unwound by the graceful exit rather than force-closed, so a `yield from` in its
+`finally` block goes on instead of throwing
+`Error: Cannot use "yield from" in a force-closed generator`. The upstream tests
+[`Zend/tests/fibers/gh10496-001.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/fibers/gh10496-001.phpt), [`Zend/tests/fibers/gh9916-009.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/fibers/gh9916-009.phpt), [`Zend/tests/generators/gh15330-003.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/generators/gh15330-003.phpt), [`Zend/tests/generators/gh15330-004.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/generators/gh15330-004.phpt), [`Zend/tests/generators/gh15330-005.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/generators/gh15330-005.phpt), [`Zend/tests/generators/gh15330-006.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/generators/gh15330-006.phpt) and [`Zend/tests/generators/gh15866.phpt`](https://github.com/php/php-src/blob/master/Zend/tests/generators/gh15866.phpt) observe this. The reference scheduler carries their adapted counterparts,
+`ext/test_scheduler/tests/034`, `036` and `055` to `059`, each stating its departure.
 
 ## Proposed PHP Version(s)
 
@@ -641,10 +664,11 @@ auto-formatters or linters. There is no new syntax and no new symbol to recogniz
 **To the JIT.** None. No new opcodes and no change to compiled code.
 
 **To Fibers.** Existing fiber code keeps working. A scheduler may adopt a foreign fiber onto its
-schedule, or decline, per fiber. The one behavior change is item 1 above.
+schedule, or decline, per fiber. The behavior changes are items 1 and 4 above.
 
 **To the Garbage Collector.** The destructor phase runs in a dedicated coroutine while a scheduler
-is active. Collection itself is unchanged.
+is active. Collection itself is unchanged, except that a fiber parked in `Fiber::suspend()` is not
+collected while it is parked when the cycle runs through its body's closure (item 4).
 
 **New Constants.** None.
 
