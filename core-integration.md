@@ -42,6 +42,10 @@ The key contracts everything else builds on:
   enqueued: every wait description dies with the wait. Diagnostics only
   (wait graph, deadlock reports); replaces the old single `awaiting_info`
   field and the `wait_info` string slot.
+- `get_coroutine_count`: how many of the request's coroutines have not
+  finished, the main one included; `ZEND_ASYNC_GET_COROUTINE_COUNT()` gives
+  0 when no scheduler provides it. It replaces the `active_coroutine_count`
+  global, which nothing kept up to date.
 - `ZEND_ASYNC_EXIT_EXCEPTION`: the slot for the exception that terminates
   the request (a deadlock, the chain accumulated during the drain). The
   slot lives in the core; the policy of filling it lives in the extension.
@@ -50,43 +54,46 @@ The key contracts everything else builds on:
 
 ## main/main.c: the request lifecycle
 
-### main.c:2209, `php_module_startup()`: `zend_async_globals_ctor()`
+### main.c:2197, `php_module_startup()`: `zend_async_globals_ctor()`
 
 Initializes the Async API globals, next to `gc_globals_ctor()`. The API
 slots and `zend_async_globals_t` must exist before extension MINIT, because
 the scheduler registers itself in the MINIT of test_scheduler / ext-async.
 
-### main.c:2806, `php_tsrm_startup_ex()`: TSRM block size
+### main.c:2794, `php_tsrm_startup_ex()`: TSRM block size
 
 `sizeof(zend_async_globals_t)` is accounted for in the preallocated ZTS
 globals block. Under ZTS all globals live in one aligned block; without
 this the access is out of bounds. Hence the rule: any change to a globals
 struct layout requires `nmake clean`.
 
-### main.c:2618, `php_execute_script()`: `ZEND_ASYNC_SCHEDULER_LAUNCH()`
+### main.c:2606, `php_execute_script()`: `ZEND_ASYNC_SCHEDULER_LAUNCH()`
 
 Before executing the prepend/primary/append files, the core launches the
-scheduler. From this moment on the script is the main coroutine. The launch
+scheduler, in a request the provider marked READY (`ZEND_ASYNC_INITIALIZE`,
+from its RINIT); a request left OFF runs without one, as a bridge's request does
+until the script registers its scheduler. From this moment on the script is
+the main coroutine. The launch
 is deliberately not lazy (TrueAsync abandoned lazy launch); this is the
 single launch point. `php -r` does not go through `php_execute_script` and
 gets no scheduler, so `spawn()` there throws "The scheduler is not
 running".
 
-### main.c:2630/2632, `php_execute_script()`: `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN()`
+### main.c:2618/2620, `php_execute_script()`: `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN()`
 
-After the main script returns (2630) or bails out (2632, flag true),
+After the main script returns (2618) or bails out (2620, flag true),
 control is handed to the scheduler one last time to finish off the
 remaining coroutines: the drain. Main is over, but parked coroutines are
 still alive, and their finally blocks must run while async is still active.
 Control comes back on the engine's own context. An exception accumulated by
 the drain ends up in EG(exception) and is reported further down the
-function (2644), like any other.
+function (2632), like any other.
 
-### main.c:1945-1957, `php_request_shutdown()`: the final pass, consuming EG
+### main.c:1937-1945, `php_request_shutdown()`: the final pass, consuming EG
 
 After `zend_call_destructors()` comes one more
 `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN(false)`: the destructors may have
-spawned or resumed coroutines. Then (1954), if the pass left an exception
+spawned or resumed coroutines. Then (1942), if the pass left an exception
 in EG(exception), it is reported and released via `zend_exception_error`.
 
 Why the second step is needed (a port of TrueAsync fix 4538c0619d): every
@@ -96,8 +103,8 @@ puts into EG(exception), the owner depends on which path executed the
 request.
 
 - **The regular path (a file).** The script runs through
-  `php_execute_script()`, which calls the drain itself (2630) and right
-  after reports whatever is left in EG (2644). There is an owner; the chain
+  `php_execute_script()`, which calls the drain itself (2618) and right
+  after reports whatever is left in EG (2632). There is an owner; the chain
   is closed.
 - **The `php -r` / embed path.** The code runs through
   `zend_eval_string()`, bypassing `php_execute_script()`, so neither the
@@ -110,11 +117,11 @@ request.
   object is never released, the user sees no fatal error, and a debug build
   prints "Freeing 0x... (152 bytes)" on exit. A leak.
 
-The guard at 1954 closes the chain for the second path with the same
+The guard at 1942 closes the chain for the second path with the same
 report-and-release `php_execute_script()` performs for the first one. For
 requests that arrive here with a clean EG (the norm) it is a no-op.
 
-### main.c:1960, `php_request_shutdown()`: `ZEND_ASYNC_DEACTIVATE`
+### main.c:1948, `php_request_shutdown()`: `ZEND_ASYNC_DEACTIVATE`
 
 The point after which everything runs synchronously; the single
 deactivation point for the whole request: no current or main coroutine,
@@ -122,7 +129,7 @@ and no scheduler context a bailout left set. What follows is output buffer
 flushing, module RSHUTDOWN and object store destruction, where no
 coroutines may exist.
 
-### main.c:2530, `php_module_shutdown()`: `zend_async_api_shutdown()`
+### main.c:2518, `php_module_shutdown()`: `zend_async_api_shutdown()`
 
 Zeroes out all registered API slots when the modules are unloaded. The
 extension is going away; no pointer may outlive it.
@@ -264,7 +271,7 @@ notification in the tree. The test is `zend_is_unwind_exit`, not
 `zend_is_graceful_exit`: a graceful exit is the disposal unwind of a
 force-closed fiber and must shut nothing down. `exit()` in the main flow
 never reaches this tail; main leaves through the end-of-main handover with
-the bailout flag (main.c:2685), so the notification stays specific to a
+the bailout flag (main.c:2620), so the notification stays specific to a
 coroutine that ends the request from inside. Tests: 064-067 in
 ext/test_scheduler/tests.
 
@@ -489,8 +496,8 @@ static C-string name (`zend_async_internal_context_key_alloc`, typically at
 MINIT). The registry is deliberately a process-global static behind a ZTS
 mutex, because a key must mean the same thing in every thread and request;
 a repeated alloc with the same string address returns the same key.
-`zend_async_scheduler_unregister()`, a per-request event for the PHP
-bridge, does not touch the registry; only the process shutdown does.
+`zend_async_scheduler_unregister()`, called at process shutdown, does not
+touch the registry; the shutdown frees it right after.
 
 **The userland context** (`Async\Context`): the core defines a plain C
 struct, `zend_async_context_t { HashTable string_keys; HashTable
@@ -552,11 +559,11 @@ without the engine owning a single name for it.
 
 | File | Lines | What |
 |---|---|---|
-| main/main.c | 2209, 2806 | API globals: ctor + slot in the TSRM block |
-| main/main.c | 2618 | scheduler launch before the script |
-| main/main.c | 2630, 2632 | drain after main (normal / bailout) |
-| main/main.c | 1945-1957 | drain at request shutdown + consuming EG |
-| main/main.c | 1960, 2530 | deactivation; zeroing the API slots |
+| main/main.c | 2197, 2794 | API globals: ctor + slot in the TSRM block |
+| main/main.c | 2606 | scheduler launch before the script |
+| main/main.c | 2618, 2620 | drain after main (normal / bailout) |
+| main/main.c | 1937-1945 | drain at request shutdown + consuming EG |
+| main/main.c | 1948, 2518 | deactivation; zeroing the API slots |
 | Zend/zend.c | 1986 | deferred uncaught report while the drain is still ahead |
 | Zend/zend_globals.h | 172-188 | cursor of the shutdown destructor passes |
 | Zend/zend_execute_API.c | 242-338 | shutdown_destructors: switch handler + iterator |

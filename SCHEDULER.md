@@ -7,27 +7,30 @@ Reference implementation branch:
 
 ## Registration
 
-A scheduler registers once per process, either from C
-(`zend_async_scheduler_register()`, typically at MINIT) or from PHP
-(`Async\SchedulerHook::register()`). A second registration fails; from PHP it
+A scheduler registers once per process and is activated per request. A C
+scheduler registers with `zend_async_scheduler_register()`, typically at MINIT,
+and marks each request READY (`ZEND_ASYNC_INITIALIZE`) in its RINIT; the
+engine launches only in a READY request. The bridge registers its slots on the
+first `Async\SchedulerHook::register()` call, and every request that wants a
+PHP scheduler calls `register()` again. A second registration in the same
+request fails, as does one while a C extension owns the slots; from PHP it
 throws an Error. `Async\SchedulerHook::getModule()` reports the active driver.
 
 `Async\SchedulerHook::register()` takes a factory: it receives the mandate
-(createContinuation, currentContinuation, currentCoroutine) and returns the
-scheduler, constructed already holding it. The factory runs synchronously
-inside `register()`, because the engine's own launch point has already passed
-by the time userland code executes; the `launch` slot itself is therefore not
-bridged to PHP and stays a C-scheduler concern.
+(bindEntry, switchTo, currentCoroutine) and returns the scheduler, constructed
+already holding it. The factory runs synchronously inside `register()`,
+because the engine's own launch point has already passed by the time userland
+code executes; `register()` then launches the scheduler itself, and the
+`launch` slot reaches the scheduler's `onLaunch()`.
 
 ## Engine Invocation Points
 
 | # | Location | Hook | Purpose |
 |---|----------|------|---------|
-| 1 | `main/main.c`, `php_execute_script_ex()`, before prepend/primary/append scripts | `launch` | The scheduler is **not lazy**: it always starts right before the script code runs. |
+| 1 | `main/main.c`, `php_execute_script_ex()`, before prepend/primary/append scripts | `launch` | The scheduler is **not lazy**: in a request the provider marked READY it starts right before the script code runs. |
 | 2 | `main/main.c`, `php_execute_script_ex()`, after all scripts complete | `suspend(fromMain: true, isBailout: false)` | The main script finished normally; the scheduler runs the remaining coroutines to completion. |
 | 3 | `main/main.c`, `php_execute_script_ex()`, inside `zend_catch` | `suspend(fromMain: true, isBailout: true)` | The main flow ended with a bailout (`exit()`, fatal error); the scheduler decides the fate of the remaining coroutines. |
 | 4 | `main/main.c`, `php_request_shutdown()`, after `zend_call_destructors()` | `suspend(fromMain: true, isBailout: false)`, then the Async state is deactivated | Last handover before the request dies: destructors may have spawned coroutines. Everything past this point is synchronous-only. |
-| 5 | `sapi/phpdbg/phpdbg_prompt.c`, around `zend_execute()` | `launch` before, `suspend(fromMain: true, ...)` after | The same pair for the phpdbg SAPI. |
 | 6 | `Zend/zend_fibers.c`, `Fiber::start()` | `intercept_fiber` | The engine asks the scheduler for a coroutine to bind to the starting fiber. A coroutine puts the fiber on the coroutine path; `null` keeps it low-level. |
 | 7 | `Zend/zend_fibers.c`, `Fiber::start()/resume()/throw()` on a bound fiber | `enqueue_coroutine` / `resume`, then `suspend(fromMain: false, ...)` | The fiber operation becomes scheduler policy: park the value (or exception), notify, hand over. The call returns the value the fiber yields. |
 | 8 | `Zend/zend_gc.c`, the destructor phase of `gc_collect_cycles()` | `gc_destructors` *(C-only)* | The around-interceptor for the destructor phase. **Not a PHP-registerable hook**: it fires at the latest stage of the request (teardown of globals and the object store), where userland is already being dismantled and no PHP scheduler can be safely re-entered, so only a C-implemented scheduler (or the engine itself) may intercept it. It brackets the engine's destructor executor (open a completion group, run, await everything the destructors spawned). A safety net re-runs missed destructors afterwards; userland `__destruct` always takes the classic synchronous path. |
@@ -100,10 +103,11 @@ the reactor in the child. With the Async state off, forking is unrestricted.
 | Phase | State transition | Actor |
 |-------|-----------------|-------|
 | MINIT | slots filled via `zend_async_scheduler_register()` | C scheduler |
-| Before script code (#1/#5) | `READY → ACTIVE` | core → `launch` |
-| During the script | PHP registration also possible: `register()` runs the scheduler factory and activates immediately | bridge |
+| RINIT | `OFF → READY` | C scheduler |
+| Before script code (#1) | `READY → ACTIVE`; a request left `OFF` runs without a scheduler | core → `launch` |
+| During the script | PHP registration, in every request that wants it: `register()` runs the scheduler factory, `OFF → READY → ACTIVE` | bridge |
 | Script runs | fibers adopted via `intercept_fiber`; operations route through the hooks | scheduler |
-| After main (#2/#3/#5) | remaining coroutines drain | core → `suspend(fromMain: true)` |
+| After main (#2/#3) | remaining coroutines drain | core → `suspend(fromMain: true)` |
 | Destructors done (#4) | final drain, then `ACTIVE → OFF` | core |
 | Shutdown | abandoned suspended managed fibers are destroyed by the regular fiber teardown; the coroutine handle is disposed with the fiber | engine |
 

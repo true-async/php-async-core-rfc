@@ -353,10 +353,13 @@ public function onShutdown(): void
 
 ### Registration
 
-A scheduler is registered once per process, and from that moment concurrency is active. There is
-no lazy initialization and no implicit start on the first asynchronous call. Registering a second
-scheduler is an `Error`, as is any other registration failure; nothing is reported through a
-return value. With no scheduler registered, every notification above is inert.
+A scheduler is registered once per process and activated per request. A C scheduler marks every
+request it serves at request startup, and the engine launches it immediately before the script's
+first line; a bridge extension activates its scheduler when the script registers one, and the
+next request registers again. There is no lazy initialization and no implicit start on the first
+asynchronous call. A second scheduler, in the same request or from another extension, is refused,
+as is any other failed registration. In a request with no active scheduler, every notification
+above is inert.
 
 ### Design rationale: why the engine defines no PHP-level hooks
 
@@ -531,7 +534,7 @@ worker that suspends. The worked-out code lives in the GC chapter of
 
 ### Scheduler activity across the request lifecycle
 
-Once registered, the scheduler is **always active**.
+Once active in a request, the scheduler stays **active** until the request ends.
 
 - **Launch.** A scheduler registered from C launches immediately before the script code runs; one
   registered during the script launches at its registration point.
