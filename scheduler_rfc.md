@@ -220,8 +220,8 @@ public function onLaunch(): object
 **Receives:**
 - `fromMain` (boolean): the main coroutine has finished. The script's code is over, and whatever
   runs afterward, such as shutdown functions and destructors, is a different flow.
-- `isBailout` (boolean): the main flow terminated abnormally, through a fatal error. This call can
-  arrive while the engine is already terminating.
+- `isBailout` (boolean): the main flow, a shutdown function or a shutdown destructor terminated
+  abnormally, through a fatal error. This call can arrive while the engine is already terminating.
 
 **Returns:** the coroutine that is running when control comes back. The engine records it as
 current. The launch and suspend return values are the only way the engine learns which coroutine
@@ -541,8 +541,10 @@ Once registered, the scheduler is **always active**.
   bailout flag, and the scheduler decides whether to finish or discard the remaining work; this is
   its last opportunity to release resources before the request is torn down.
 - **After destructors.** Once object destructors have run, the scheduler receives one final
-  end-of-main handover, since destructors may have spawned coroutines. After it returns,
-  concurrency is terminated and the rest of the request shutdown is synchronous.
+  end-of-main handover, since destructors may have spawned coroutines. When a destructor ended in
+  a fatal error, every object is already marked destructed and this handover carries the bailout
+  flag. After it returns, concurrency is terminated and the rest of the request shutdown is
+  synchronous.
 - **exit().** A coroutine ending through `exit()` raises the shutdown notification, so concurrency
   ends on the scheduler's terms rather than tearing the request down mid-flight.
 
