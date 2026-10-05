@@ -117,7 +117,8 @@ requests that arrive here with a clean EG (the norm) it is a no-op.
 ### main.c:1960, `php_request_shutdown()`: `ZEND_ASYNC_DEACTIVATE`
 
 The point after which everything runs synchronously; the single
-deactivation point for the whole request. What follows is output buffer
+deactivation point for the whole request: no current or main coroutine,
+and no scheduler context a bailout left set. What follows is output buffer
 flushing, module RSHUTDOWN and object store destruction, where no
 coroutines may exist.
 
@@ -169,7 +170,7 @@ moment where the suspend can be noticed.
 
 On leaving the coroutine (is_enter=false), if the pass has started and is
 not finished, an internal iterator coroutine is created via
-`ZEND_ASYNC_GC_NEW_COROUTINE()` (its internal_entry continues the pass from
+`ZEND_ASYNC_NEW_COROUTINE()` (its internal_entry continues the pass from
 EG(shutdown_context).idx) and enqueued. A suspended destructor parks the
 pass's coroutine, so the pass itself is carried on by an independent
 iterator. The handler returns false: it is one-shot.
@@ -358,7 +359,7 @@ If async is active and the caller is not the GC coroutine:
   a foreign stack and **cannot see** the caller's live TMPVARs, so they
   must be shielded (gc_047, bug80072);
 - if there is no GC coroutine, `new_gc_coroutine()` creates one:
-  `ZEND_ASYNC_GC_NEW_COROUTINE()` plus enqueue, the body is
+  `ZEND_ASYNC_NEW_COROUTINE()` plus enqueue, the body is
   `zend_gc_coroutine()`;
 - the caller blocks in `ZEND_ASYNC_AWAIT(GC_G(gc_coroutine))`. The wait
   list lives on the coroutine itself; there are no global waiter lists.
@@ -367,10 +368,6 @@ If async is active and the caller is not the GC coroutine:
   and when the waiter was cancelled. Otherwise the removed roots fall out
   of GC tracking forever, a silent leak (closed by the 2026-07-15 review,
   test 020_gc_await_cancel).
-
-Why `ZEND_ASYNC_GC_NEW_COROUTINE` rather than a plain one: a scheduler may
-allocate service coroutines differently (no userland object, etc.); the
-fallback is the plain `new_coroutine`.
 
 ## The destructor phase as a concurrent iterator (zend_gc.c:2016-2166)
 
@@ -522,9 +519,12 @@ the engine now compiles in no PHP symbols at all.
 
 Nothing engine-side was lost in the move: the bridge talked to the core
 exclusively through exported `ZEND_API`, which is why it can build as an
-ordinary out-of-tree extension. That it still works unchanged is the
-runtime proof that the ABI seam is sufficient for a PHP-facing provider,
-without the engine owning a single name for it.
+ordinary out-of-tree extension: the proof that the ABI seam is sufficient
+for a PHP-facing provider, without the engine owning a single name for it.
+It was last updated on 2026-07-22; later cleanups of the proof of concept
+removed API it calls (`zend_async_coroutine_from_object()`,
+`ZEND_COROUTINE_F_OBJ_REF`, `zend_async_is_enabled()`), so it needs an
+update to build again.
 
 ## Testing strategy
 
