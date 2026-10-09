@@ -296,7 +296,9 @@ other coroutine. The fiber's operations become scheduler policy: `start()`, `res
 scheduler rather than switching into the fiber immediately. While the scheduler runs its own
 work rather than a coroutine, `Fiber::start()`, `resume()`, `throw()` and `suspend()` throw
 `FiberError` before changing any state, as they do where switching is blocked: there is no
-coroutine to park, and a switch would take the scheduler out of its own loop.
+coroutine to park, and a switch would take the scheduler out of its own loop. An adopted coroutine
+cancelled before the body runs ends the fiber without running it, and `start()` throws that
+cancellation.
 **Scheduler must:** decide per fiber. A scheduler that creates fibers for its own use must
 decline them, or it would recurse into itself; it recognizes them by keeping its own private set,
 since the engine tracks nothing here and no outside code can mark a fiber as internal.
@@ -546,8 +548,8 @@ Once active in a request, the scheduler stays **active** until the request ends.
 - **After destructors.** Once object destructors have run, the scheduler receives one final
   end-of-main handover, since destructors may have spawned coroutines. When a destructor ended in
   a fatal error, every object is already marked destructed and this handover carries the bailout
-  flag. After it returns, concurrency is terminated and the rest of the request shutdown is
-  synchronous.
+  flag. It returns no main coroutine: after it returns, concurrency is terminated and the rest of
+  the request shutdown is synchronous.
 - **exit().** A coroutine ending through `exit()` raises the shutdown notification, so concurrency
   ends on the scheduler's terms rather than tearing the request down mid-flight.
 
