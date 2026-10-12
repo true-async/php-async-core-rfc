@@ -339,12 +339,14 @@ fixed for both paths.
 
 # GC: Zend/zend_gc.c (its own chapter)
 
-Context: `zend_gc_collect_cycles()` must stay **synchronous** for the
-caller (the userland `gc_collect_cycles()` contract), yet destructors may
-suspend. The solution: the collection runs in a dedicated GC coroutine and
-the caller parks until it finishes; the destructor phase is one more layer
-of coroutines. This is a deliberate departure from TrueAsync, whose async
-GC returns 0 immediately.
+Context: an explicit `gc_collect_cycles()` must stay **synchronous** for
+the caller (the userland contract), yet destructors may suspend. The
+solution: the collection runs in a dedicated GC coroutine and the explicit
+caller parks until it finishes; the destructor phase is one more layer of
+coroutines. This is a deliberate departure from TrueAsync, whose async GC
+returns 0 immediately. The automatic run that a full root buffer starts
+does not park its coroutine, as in TrueAsync (see "The automatic run"
+below).
 
 ## The state (GC_G, zend_gc.c:300 and nearby)
 
@@ -353,7 +355,10 @@ GC returns 0 immediately.
 - `dtor_pending`: the count of unfinished iterators;
 - `microtask`: the re-arming microtask that spawns the next iterator;
 - `dtor_idx`/`dtor_end`: the cursor over the garbage buffer;
-- `gc_collected`: the result for whoever waits.
+- `gc_collected`: the result for whoever waits;
+- `adjust_threshold`: a full buffer queued the run, which takes the threshold step;
+- `queued_run_counter`/`queued_run_roots`: the coroutine counting roots past
+  the queued run, compared and never dereferenced, and `num_roots` when it began.
 
 ## zend_gc.c:2201-2237, `zend_gc_collect_cycles()`: the synchronous wrapper
 
@@ -379,6 +384,23 @@ If async is active and the caller is not the GC coroutine:
 Why `ZEND_ASYNC_GC_NEW_COROUTINE` rather than a plain one: a scheduler may
 allocate service coroutines differently (no userland object, etc.); the
 fallback is the plain `new_coroutine`.
+
+## `gc_possible_root_when_full()`: the automatic run
+
+A root added to a full buffer in a coroutine only queues the GC coroutine
+(`gc_queue_run()`) and goes on; the run takes the threshold step once.
+Parking there would be a hidden suspension at any refcount decrement (the
+VM's release of `$this` after every method call among them): other
+coroutines would run inside C code that holds what they change, and a
+cancellation would be thrown there, after `recv()` had taken its message
+(2026-10-12). One exception: a coroutine waits for the run, as an
+explicit call does, once it has added another `10 × GC_THRESHOLD_STEP` roots
+before the run starts. The count starts at its first root that finds the
+buffer full, and starts again when another coroutine adds such a root and
+after any wait, cancelled or refused. The wait holds the exception and its
+throw position across the park. That bounds a synchronous loop that makes
+garbage: 3 000 000 cycles in a coroutine under 128M peak at 60.3M (debug
+build, 2026-10-12).
 
 ## The destructor phase as a concurrent iterator (zend_gc.c:2016-2166)
 

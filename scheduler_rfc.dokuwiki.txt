@@ -592,10 +592,12 @@ return ''0'':
 In all three cases no collection result is available to report. Code that treats ''0'' as "there was
 nothing to collect" will read these as the same thing.
 
-When the scheduler cannot queue the collection's coroutine, the scheduler's error is thrown instead
-of a result, and not only from an explicit ''gc_collect_cycles()'': a collection the engine starts
-itself when its root buffer fills throws it from whatever statement released the last root, such as
-an ''unset()'' or an assignment.
+When the scheduler cannot queue the collection's coroutine, an explicit ''gc_collect_cycles()''
+throws the scheduler's error instead of a result. A collection the engine starts itself when its
+root buffer fills throws no such error: the statement that released the last root, such as an
+''unset()'' or an assignment, only dropped a reference. That statement can throw a cancellation of its
+coroutine, though, when the coroutine waits for the collection (see "To the Garbage Collector"):
+there is no result to return 0 for.
 
 ==== 3. Forking the process is restricted while a scheduler is active ====
 
@@ -645,9 +647,13 @@ auto-formatters or linters. There is no new syntax and no new symbol to recogniz
 **To Fibers.** Existing fiber code keeps working. A scheduler may adopt a foreign fiber onto its
 schedule, or decline, per fiber. The behavior changes are items 1 and 4 above.
 
-**To the Garbage Collector.** The destructor phase runs in a dedicated coroutine while a scheduler
-is active. Collection itself is unchanged, except that a fiber parked in ''Fiber::suspend()'' is not
-collected while it is parked when the cycle runs through its body's closure (item 4).
+**To the Garbage Collector.** The collection and its destructor phase run in a dedicated coroutine
+while a scheduler is active. An explicit ''gc_collect_cycles()'' waits for that coroutine. A
+collection the engine starts when its root buffer fills only queues it: the coroutine that filled
+the buffer goes on, and waits only when it keeps adding roots far past the queued collection
+without yielding, as a loop that makes garbage does. Collection itself is unchanged, except that a
+fiber parked in ''Fiber::suspend()'' is not collected while it is parked when the cycle runs through
+its body's closure (item 4).
 
 **New Constants.** None.
 
